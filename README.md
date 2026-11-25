@@ -29,6 +29,9 @@
 - **缩放（50%–200%）**：点击展开滑块条，支持 `5%` 步进实时缩放当前应用画面，点击百分比胶囊一键重置 `100%`（单应用独立记忆）。
 - **画中画**：多任务模式调用原生 `PiPManager.shared` 实现跨进程画中画；单任务模式支持 `AVPictureInPictureController` 投屏。
 - **全屏（多任务模式）**：对接原生 `MultitaskDockManager.shared.toggleDockCollapse()`，一键对**所有多任务子进程**开启/退出无顶栏完全全屏。
+- **微珠设置入口**：
+  - 在 LiveContainer「设置 → 多任务」页面右上角导航栏自动挂载原生 **「微珠设置」** 按钮；
+  - 也可在抽屉底部点击 **「微珠」** 按钮随时打开设置页，支持切换**唤出方式（折叠微珠 / 边缘手势）**、**5 种微珠样式**（极简光条 / 无框毛玻璃 / 青紫霓虹 / 黑曜圆珠 / 极光液态）、**折叠透明度**与**单开默认随系统旋转**，单开与多任务实时共用。
 - **旋转（单任务模式，默认开启）**：单开默认开启随系统自由旋转，单应用独立记忆开关，关闭时无损恢复原始方法实现。
 
 ### 4. 无缝替代 LiveContainer 3.8.0+ 原生多任务侧边栏
@@ -61,7 +64,7 @@ chmod +x build.sh
 编译产物：
 - `LCSwitcher.dylib`（arm64，已 `strip -x` 并 Ad-Hoc 签名，~190 KB）
 - `LCSwitcher.plist`
-- `LCSwitcher_1.1.0_iphoneos-arm.deb`
+- `LCSwitcher_1.2.0_iphoneos-arm.deb`
 - `LCSwitcher.zip`
 
 ---
