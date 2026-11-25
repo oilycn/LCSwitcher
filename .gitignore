@@ -1,0 +1,6 @@
+.DS_Store
+deb_package/
+*.dylib
+*.deb
+*.zip
+*.plist
