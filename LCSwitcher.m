@@ -105,7 +105,8 @@ static NSString *LCForceAutoRotateKeyForFolder(NSString *folderName) {
 
 static BOOL LCLoadForceAutoRotateForFolder(NSString *folderName) {
     NSString *key = LCForceAutoRotateKeyForFolder(folderName);
-    return [[NSUserDefaults standardUserDefaults] boolForKey:key];
+    id val = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+    return val ? [val boolValue] : YES;
 }
 
 static void LCSaveForceAutoRotateForFolder(NSString *folderName, BOOL enabled) {
@@ -488,10 +489,7 @@ static void LCApplyScreenScaleNow(void) {
 @end
 
 @implementation LCSwitcherBeadView {
-    UIVisualEffectView *_blurView;
     UIView *_grabberBarView;
-    UIView *_indicatorRingView;
-    CGPoint _initialPanCenter;
     BOOL _didTriggerSwipeOpen;
 }
 
@@ -504,47 +502,53 @@ static void LCApplyScreenScaleNow(void) {
     return self;
 }
 
+- (void)setIsPinnedRight:(BOOL)isPinnedRight {
+    if (_isPinnedRight != isPinnedRight) {
+        _isPinnedRight = isPinnedRight;
+        [self setNeedsLayout];
+    }
+}
+
 - (void)setupUI {
     self.clipsToBounds = NO;
-    self.backgroundColor = [UIColor clearColor];
+    self.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.004];
     self.autoresizingMask = UIViewAutoresizingNone;
 
-    UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
-    _blurView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
-    _blurView.frame = self.bounds;
-    _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _blurView.layer.cornerRadius = self.bounds.size.width / 2.0;
-    _blurView.layer.cornerCurve = kCACornerCurveContinuous;
-    _blurView.clipsToBounds = YES;
-    _blurView.layer.borderWidth = 0.0;
-    [self addSubview:_blurView];
-
-    self.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.layer.shadowOpacity = 0.28;
-    self.layer.shadowRadius = 6.0;
-    self.layer.shadowOffset = CGSizeMake(0, 1);
-
-    // 内部垂直微珠高光胶囊条（无边框纯净毛玻璃感）
-    CGFloat barW = 4.0;
-    CGFloat barH = 26.0;
-    _grabberBarView = [[UIView alloc] initWithFrame:CGRectMake((self.bounds.size.width - barW) / 2.0, (self.bounds.size.height - barH) / 2.0, barW, barH)];
-    _grabberBarView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.86];
-    _grabberBarView.layer.cornerRadius = barW / 2.0;
-    _grabberBarView.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+    // 极简贴边光条（与多任务折叠微珠 1:1 一致，无厚重毛玻璃灰壳）
+    _grabberBarView = [[UIView alloc] initWithFrame:CGRectZero];
+    _grabberBarView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.84];
+    _grabberBarView.layer.cornerRadius = 2.25;
+    _grabberBarView.layer.cornerCurve = kCACornerCurveContinuous;
+    _grabberBarView.layer.shadowColor = [UIColor blackColor].CGColor;
+    _grabberBarView.layer.shadowOpacity = 0.36;
+    _grabberBarView.layer.shadowRadius = 3.5;
+    _grabberBarView.layer.shadowOffset = CGSizeZero;
     _grabberBarView.userInteractionEnabled = NO;
-    [_blurView.contentView addSubview:_grabberBarView];
+    [self addSubview:_grabberBarView];
 
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap)];
     [self addGestureRecognizer:tap];
 
+    // 普通轻滑仅用于向内呼出抽屉，绝不位移微珠
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
     [self addGestureRecognizer:pan];
+
+    // 按住 0.5 秒后解锁拖动位移
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPressMove:)];
+    longPress.minimumPressDuration = 0.5;
+    longPress.cancelsTouchesInView = YES;
+    [self addGestureRecognizer:longPress];
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGFloat r = MIN(self.bounds.size.width, self.bounds.size.height) / 2.0;
-    _blurView.layer.cornerRadius = r;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    CGFloat grabberW = 4.5;
+    CGFloat grabberH = 52.0;
+    CGFloat grabberX = self.isPinnedRight ? (self.bounds.size.width - grabberW - 2.5) : 2.5;
+    _grabberBarView.frame = CGRectMake(grabberX, (self.bounds.size.height - grabberH) * 0.5, grabberW, grabberH);
+    [CATransaction commit];
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
@@ -563,51 +567,61 @@ static void LCApplyScreenScaleNow(void) {
     if (!superview) return;
 
     switch (gesture.state) {
-        case UIGestureRecognizerStateBegan: {
-            _initialPanCenter = self.center;
+        case UIGestureRecognizerStateBegan:
             _didTriggerSwipeOpen = NO;
-            [UIView animateWithDuration:0.15 animations:^{
-                self.transform = CGAffineTransformMakeScale(1.12, 1.06);
-                self.alpha = 1.0;
-            }];
             break;
-        }
         case UIGestureRecognizerStateChanged: {
-            CGPoint translation = [gesture translationInView:superview];
-            CGPoint newCenter = CGPointMake(_initialPanCenter.x + translation.x, _initialPanCenter.y + translation.y);
-            self.center = newCenter;
-            if (self.onPanMoved) self.onPanMoved(newCenter);
-            break;
-        }
-        case UIGestureRecognizerStateEnded:
-        case UIGestureRecognizerStateCancelled: {
+            if (_didTriggerSwipeOpen) return;
             CGPoint translation = [gesture translationInView:superview];
             CGPoint velocity = [gesture velocityInView:superview];
-            CGFloat halfW = superview.bounds.size.width * 0.45;
-            BOOL isHorizontalFlick = fabs(translation.x) > fabs(translation.y) * 1.25;
             BOOL swipedInward = self.isPinnedRight
-                ? (translation.x < -22.0 && velocity.x < -280.0)
-                : (translation.x > 22.0 && velocity.x > 280.0);
-            BOOL stayedOnSameHalf = (fabs(translation.x) < halfW);
-
-            [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
-                self.transform = CGAffineTransformIdentity;
-            } completion:nil];
-
-            if (gesture.state == UIGestureRecognizerStateEnded && isHorizontalFlick && swipedInward && stayedOnSameHalf) {
-                // 快速向内轻滑：微珠回弹贴边并呼出抽屉
-                [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0.5 options:0 animations:^{
-                    self.center = self->_initialPanCenter;
-                } completion:nil];
+                ? (translation.x < -14.0 || velocity.x < -120.0)
+                : (translation.x > 14.0 || velocity.x > 120.0);
+            if (swipedInward) {
+                _didTriggerSwipeOpen = YES;
                 if (self.onSwipeToOpen) {
                     self.onSwipeToOpen();
                 } else if (self.onTap) {
                     self.onTap();
                 }
-            } else if (self.onPanEnded) {
-                // 正常拖拽（含拖到屏幕对侧左/右边缘或上下调整高度）：吸附到松手一侧并保存位置
-                self.onPanEnded(self.center);
             }
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+            _didTriggerSwipeOpen = NO;
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)handleLongPressMove:(UILongPressGestureRecognizer *)gesture {
+    if (self.onUserInteraction) self.onUserInteraction();
+    UIView *superview = self.superview;
+    if (!superview) return;
+    CGPoint loc = [gesture locationInView:superview];
+
+    switch (gesture.state) {
+        case UIGestureRecognizerStateBegan: {
+            [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+            [UIView animateWithDuration:0.16 animations:^{
+                self.transform = CGAffineTransformMakeScale(1.18, 1.12);
+                self.alpha = 1.0;
+            }];
+            break;
+        }
+        case UIGestureRecognizerStateChanged: {
+            self.center = loc;
+            if (self.onPanMoved) self.onPanMoved(loc);
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled: {
+            [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
+                self.transform = CGAffineTransformIdentity;
+            } completion:nil];
+            if (self.onPanEnded) self.onPanEnded(self.center);
             break;
         }
         default:
@@ -1861,7 +1875,7 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
     [self.view addSubview:self.drawerView];
 
     // 3. 贴边悬浮微珠（胶囊微珠形状，支持点击与向内侧滑呼出抽屉）
-    self.beadView = [[LCSwitcherBeadView alloc] initWithFrame:CGRectMake(0, 0, 16.0, 54.0)];
+    self.beadView = [[LCSwitcherBeadView alloc] initWithFrame:CGRectMake(0, 0, 10.0, 60.0)];
     self.beadView.onTap = ^{
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [feedback impactOccurred];
@@ -1918,12 +1932,12 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
     UIEdgeInsets insets = self.view.safeAreaInsets;
     CGFloat safeTop = insets.top > 0 ? insets.top : 44.0;
     CGFloat safeBottom = insets.bottom > 0 ? insets.bottom : 34.0;
-    CGFloat beadW = 16.0;
-    CGFloat beadH = 54.0;
+    CGFloat beadW = 10.0;
+    CGFloat beadH = 60.0;
     CGFloat usableHeight = MAX(size.height - safeTop - safeBottom - beadH, 100.0);
 
     CGFloat targetY = safeTop + usableHeight * _beadCenterYRatio;
-    CGFloat targetX = _isBeadPinnedRight ? (size.width - beadW + 2.0) : -2.0;
+    CGFloat targetX = _isBeadPinnedRight ? (size.width - beadW) : 0.0;
 
     self.beadView.isPinnedRight = _isBeadPinnedRight;
     self.beadView.frame = CGRectMake(targetX, targetY, beadW, beadH);
@@ -1947,8 +1961,8 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
     UIEdgeInsets insets = self.view.safeAreaInsets;
     CGFloat safeTop = insets.top > 0 ? insets.top : 44.0;
     CGFloat safeBottom = insets.bottom > 0 ? insets.bottom : 34.0;
-    CGFloat beadW = 16.0;
-    CGFloat beadH = 54.0;
+    CGFloat beadW = 10.0;
+    CGFloat beadH = 60.0;
     CGFloat usableHeight = MAX(size.height - safeTop - safeBottom - beadH, 100.0);
 
     CGFloat clampedY = MIN(MAX(center.y, safeTop + beadH / 2.0), size.height - safeBottom - beadH / 2.0);
@@ -1958,7 +1972,7 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
     self.beadView.isPinnedRight = _isBeadPinnedRight;
     [self saveBeadPosition];
 
-    CGFloat targetX = _isBeadPinnedRight ? (size.width - beadW + 2.0) : -2.0;
+    CGFloat targetX = _isBeadPinnedRight ? (size.width - beadW) : 0.0;
     CGFloat targetY = clampedY - beadH / 2.0;
 
     __weak typeof(self) weakSelf = self;
@@ -2302,13 +2316,13 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
         }
     }
 
-    // 宿主多任务模式下立即挂载，单任务模式下延时 1.2 秒确保客态主窗口挂载完毕
+    // 宿主多任务模式下立即挂载，单任务模式下轻量延时 0.2 秒极速挂载微珠
     if (gIsMultitaskHostMode) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[self sharedManager] performSetup];
         });
     } else {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [[self sharedManager] performSetup];
         });
     }
@@ -2335,7 +2349,7 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
 
     if (!scene) {
         __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [weakSelf performSetup];
         });
         return;
