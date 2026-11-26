@@ -1646,15 +1646,16 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
 
     UIImage *rawIcon = app.icon ?: [UIImage systemImageNamed:@"app.fill"];
     UIImageView *iconView = [[UIImageView alloc] init];
-    // 前台与后台运行中均为彩色图标；仅未运行的应用显示灰度图标
-    iconView.image = isRunning ? rawIcon : (LCGrayscaleImage(rawIcon) ?: rawIcon);
-    iconView.alpha = isRunning ? 1.0 : 0.68;
+    // 单任务模式下全部应用图标均以彩色呈现（当前运行应用以绿框+绿点突出）；多任务模式下仅未运行应用显示灰度
+    BOOL showColor = !gIsMultitaskHostMode || isRunning;
+    iconView.image = showColor ? rawIcon : (LCGrayscaleImage(rawIcon) ?: rawIcon);
+    iconView.alpha = showColor ? 1.0 : 0.68;
     iconView.contentMode = UIViewContentModeScaleAspectFill;
     iconView.layer.cornerRadius = 11.0;
     iconView.layer.cornerCurve = kCACornerCurveContinuous;
     iconView.clipsToBounds = YES;
     iconView.layer.borderWidth = isForeground ? 1.5 : 0.5;
-    iconView.layer.borderColor = isForeground ? [UIColor systemGreenColor].CGColor : [UIColor colorWithWhite:1.0 alpha:(isRunning ? 0.28 : 0.14)].CGColor;
+    iconView.layer.borderColor = isForeground ? [UIColor systemGreenColor].CGColor : [UIColor colorWithWhite:1.0 alpha:(showColor ? 0.28 : 0.14)].CGColor;
     iconView.translatesAutoresizingMaskIntoConstraints = NO;
     iconView.userInteractionEnabled = NO;
     [tile addSubview:iconView];
@@ -1682,7 +1683,7 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
     nameLabel.userInteractionEnabled = NO;
     nameLabel.text = app.name;
     nameLabel.font = [UIFont systemFontOfSize:10.5 weight:(isForeground ? UIFontWeightSemibold : UIFontWeightRegular)];
-    nameLabel.textColor = isRunning ? [UIColor colorWithWhite:1.0 alpha:(isForeground ? 1.0 : 0.88)] : [UIColor colorWithWhite:1.0 alpha:0.52];
+    nameLabel.textColor = showColor ? [UIColor colorWithWhite:1.0 alpha:(isForeground ? 1.0 : 0.88)] : [UIColor colorWithWhite:1.0 alpha:0.52];
     nameLabel.textAlignment = NSTextAlignmentCenter;
     nameLabel.numberOfLines = 1;
     nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -3779,6 +3780,15 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
 }
 
 + (NSString *)currentGuestFolderName {
+    // 0. Gnoix 纯净空壳模式预埋的客态物理路径环境变量（精确拿到 .app 文件夹名）
+    const char *gnoixGuestPath = getenv("GNOIX_CURRENT_GUEST_APP_PATH");
+    if (gnoixGuestPath && strlen(gnoixGuestPath) > 0) {
+        NSString *folder = [[NSString stringWithUTF8String:gnoixGuestPath] lastPathComponent];
+        if (folder.length > 0) {
+            return folder;
+        }
+    }
+
     // 1. 环境变量
     const char *envAppId = getenv("LC_APP_ID");
     if (envAppId && strlen(envAppId) > 0) {
