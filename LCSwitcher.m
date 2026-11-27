@@ -700,53 +700,173 @@ static void LCApplyScreenScaleNow(void) {
         grad.cornerRadius = 5.0;
         [_grabberBarView.layer insertSublayer:grad atIndex:0];
     } else {
-        // minimalLine（默认：灵动液态半胶囊耳翼）
-        _grabberBarView.backgroundColor = [UIColor colorWithRed:0.10 green:0.12 blue:0.16 alpha:0.62];
-        _grabberBarView.layer.shadowColor = [UIColor blackColor].CGColor;
-        _grabberBarView.layer.shadowOpacity = 0.28;
-        _grabberBarView.layer.shadowRadius = 6.0;
-        _grabberBarView.layer.shadowOffset = CGSizeZero;
+        // minimalLine（默认：iOS 18+ 侧边实体按键同款黑色边框凸起动效）
+        _grabberBarView.backgroundColor = [UIColor clearColor];
+        _grabberBarView.layer.shadowOpacity = 0.0;
     }
     [self setNeedsLayout];
+}
+
+- (UIBezierPath *)bezelBulgePathForSize:(CGSize)size depth:(CGFloat)depth pinnedRight:(BOOL)right openCurveOnly:(BOOL)openOnly {
+    CGFloat w = size.width;
+    CGFloat h = size.height;
+    CGFloat edgeX = right ? w : 0.0;
+    CGFloat peakX = right ? MAX(0.0, w - depth) : MIN(w, depth);
+
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    [path moveToPoint:CGPointMake(edgeX, 0.0)];
+    [path addCurveToPoint:CGPointMake(peakX, h * 0.5)
+            controlPoint1:CGPointMake(edgeX, h * 0.24)
+            controlPoint2:CGPointMake(peakX, h * 0.30)];
+    [path addCurveToPoint:CGPointMake(edgeX, h)
+            controlPoint1:CGPointMake(peakX, h * 0.70)
+            controlPoint2:CGPointMake(edgeX, h * 0.76)];
+    if (!openOnly) {
+        [path closePath];
+    }
+    return path;
+}
+
+- (void)animateBezelBulgeDepth:(CGFloat)depth duration:(CFTimeInterval)duration {
+    CGSize sz = _grabberBarView.bounds.size;
+    if (sz.width <= 0 || sz.height <= 0) return;
+
+    UIBezierPath *fillPath = [self bezelBulgePathForSize:sz depth:depth pinnedRight:self.isPinnedRight openCurveOnly:NO];
+    UIBezierPath *rimPath = [self bezelBulgePathForSize:sz depth:depth pinnedRight:self.isPinnedRight openCurveOnly:YES];
+
+    void (^morphShape)(CAShapeLayer *, CGPathRef, NSString *) = ^(CAShapeLayer *shape, CGPathRef targetPath, NSString *key) {
+        if (!shape) return;
+        if (duration > 0.0) {
+            CASpringAnimation *anim = [CASpringAnimation animationWithKeyPath:@"path"];
+            anim.fromValue = (__bridge id)(shape.presentationLayer ? ((CAShapeLayer *)shape.presentationLayer).path : shape.path);
+            anim.toValue = (__bridge id)targetPath;
+            anim.damping = 16.0;
+            anim.stiffness = 340.0;
+            anim.mass = 0.85;
+            anim.duration = duration;
+            [shape addAnimation:anim forKey:key];
+        }
+        shape.path = targetPath;
+    };
+
+    UIView *blurHost = [_grabberBarView viewWithTag:9092];
+    if (blurHost && [blurHost.layer.mask isKindOfClass:[CAShapeLayer class]]) {
+        morphShape((CAShapeLayer *)blurHost.layer.mask, fillPath.CGPath, @"bezelMask");
+    }
+    for (CALayer *sub in _grabberBarView.layer.sublayers) {
+        if ([sub.name isEqualToString:@"lcBezelFill"] && [sub isKindOfClass:[CAShapeLayer class]]) {
+            morphShape((CAShapeLayer *)sub, fillPath.CGPath, @"bezelBulge");
+        } else if ([sub.name isEqualToString:@"lcBezelRim"] && [sub isKindOfClass:[CAShapeLayer class]]) {
+            morphShape((CAShapeLayer *)sub, rimPath.CGPath, @"bezelBulgeRim");
+        }
+    }
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    // 纤细悬浮胶囊微珠：不贴死边缘，全圆角纤细形态，居中柔光核心
+
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
-    CGFloat pillW = MIN(MAX(w, 6.0), 8.0);
-    CGFloat pillH = MIN(h, 60.0);
-    CGFloat pillX = (w - pillW) * 0.5;
-    CGFloat pillY = (h - pillH) * 0.5;
-    _grabberBarView.frame = CGRectMake(pillX, pillY, pillW, pillH);
-    _grabberBarView.layer.cornerRadius = pillW * 0.5;
-    _grabberBarView.layer.cornerCurve = kCACornerCurveContinuous;
-    _grabberBarView.layer.maskedCorners = (kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner);
 
-    // 居中纤细发光内芯
-    UIView *innerGlow = [_grabberBarView viewWithTag:9091];
-    if (!innerGlow) {
-        innerGlow = [[UIView alloc] init];
-        innerGlow.tag = 9091;
-        innerGlow.userInteractionEnabled = NO;
-        innerGlow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.90];
-        innerGlow.layer.cornerRadius = 1.25;
-        [_grabberBarView addSubview:innerGlow];
-    }
-    CGFloat glowW = 2.5;
-    CGFloat glowH = 30.0;
-    innerGlow.frame = CGRectMake((pillW - glowW) * 0.5, (pillH - glowH) * 0.5, glowW, glowH);
+    // 统一采用透明液态玻璃边框凸起特效（毛玻璃折射 + 玻璃高光内弧）
+    UIView *oldInner = [_grabberBarView viewWithTag:9091];
+    if (oldInner) [oldInner removeFromSuperview];
+    _grabberBarView.frame = CGRectMake(0, 0, w, h);
+    _grabberBarView.backgroundColor = [UIColor clearColor];
+    _grabberBarView.layer.cornerRadius = 0.0;
 
+    NSMutableArray<CALayer *> *toDrop = [NSMutableArray array];
+    CAShapeLayer *bezelFill = nil;
+    CAShapeLayer *bezelRim = nil;
     for (CALayer *sub in _grabberBarView.layer.sublayers) {
-        if ([sub.name isEqualToString:@"lcBeadGrad"]) {
-            sub.frame = _grabberBarView.bounds;
-            sub.cornerRadius = _grabberBarView.layer.cornerRadius;
+        if ([sub.name isEqualToString:@"lcAuraOuter"] || [sub.name isEqualToString:@"lcAuraCore"] || [sub.name isEqualToString:@"lcBeadGrad"]) {
+            [toDrop addObject:sub];
+        } else if ([sub.name isEqualToString:@"lcBezelFill"]) {
+            bezelFill = (CAShapeLayer *)sub;
+        } else if ([sub.name isEqualToString:@"lcBezelRim"]) {
+            bezelRim = (CAShapeLayer *)sub;
         }
     }
+    for (CALayer *sub in toDrop) [sub removeFromSuperlayer];
+
+    UIBezierPath *fillPath = [self bezelBulgePathForSize:CGSizeMake(w, h) depth:7.5 pinnedRight:self.isPinnedRight openCurveOnly:NO];
+    UIBezierPath *rimPath = [self bezelBulgePathForSize:CGSizeMake(w, h) depth:7.5 pinnedRight:self.isPinnedRight openCurveOnly:YES];
+
+    // 1. 移除任何 UIVisualEffectView（iOS 26/27 UIGlassEffect 会忽略 layer.mask 导致显露矩形外罩）
+    UIView *oldBlur = [_grabberBarView viewWithTag:9092];
+    if (oldBlur) [oldBlur removeFromSuperview];
+
+    // 2. 纯矢量贝塞尔液态玻璃填充 + 首尾渐隐高光内弧（零矩形边界，黑白背景均自然通透）
+    UIColor *tintColor = [UIColor colorWithWhite:1.0 alpha:0.14];
+    UIColor *rimColor = [UIColor colorWithWhite:1.0 alpha:0.42];
+    if ([_currentBeadStyle isEqualToString:@"glassCapsule"]) {
+        tintColor = [UIColor colorWithWhite:0.95 alpha:0.22];
+        rimColor = [UIColor colorWithWhite:1.0 alpha:0.54];
+    } else if ([_currentBeadStyle isEqualToString:@"neonGlow"]) {
+        tintColor = [UIColor colorWithRed:0.25 green:0.75 blue:1.0 alpha:0.18];
+        rimColor = [UIColor colorWithRed:0.42 green:0.86 blue:1.0 alpha:0.65];
+    } else if ([_currentBeadStyle isEqualToString:@"obsidianDot"]) {
+        tintColor = [UIColor colorWithWhite:0.06 alpha:0.32];
+        rimColor = [UIColor colorWithWhite:1.0 alpha:0.28];
+    } else if ([_currentBeadStyle isEqualToString:@"auroraPill"]) {
+        tintColor = [UIColor colorWithRed:0.52 green:0.48 blue:1.0 alpha:0.20];
+        rimColor = [UIColor colorWithRed:0.70 green:0.66 blue:1.0 alpha:0.65];
+    }
+
+    if (!bezelFill) {
+        bezelFill = [CAShapeLayer layer];
+        bezelFill.name = @"lcBezelFill";
+        bezelFill.shadowColor = [UIColor blackColor].CGColor;
+        bezelFill.shadowOpacity = 0.14;
+        bezelFill.shadowRadius = 4.0;
+        bezelFill.shadowOffset = CGSizeZero;
+        [_grabberBarView.layer addSublayer:bezelFill];
+    }
+    bezelFill.fillColor = tintColor.CGColor;
+    bezelFill.frame = CGRectMake(0, 0, w, h);
+    bezelFill.path = fillPath.CGPath;
+
+    if (!bezelRim) {
+        bezelRim = [CAShapeLayer layer];
+        bezelRim.name = @"lcBezelRim";
+        bezelRim.fillColor = [UIColor clearColor].CGColor;
+        bezelRim.lineWidth = 0.85;
+        bezelRim.lineCap = kCALineCapRound;
+        // 上下两端渐隐遮罩：让高光弧线在首尾自然消融进边框，纯黑背景下不露硬线头
+        CAGradientLayer *rimFade = [CAGradientLayer layer];
+        rimFade.colors = @[
+            (__bridge id)[UIColor clearColor].CGColor,
+            (__bridge id)[UIColor whiteColor].CGColor,
+            (__bridge id)[UIColor clearColor].CGColor
+        ];
+        rimFade.locations = @[@0.0, @0.5, @1.0];
+        rimFade.startPoint = CGPointMake(0.5, 0.0);
+        rimFade.endPoint = CGPointMake(0.5, 1.0);
+        bezelRim.mask = rimFade;
+        [_grabberBarView.layer addSublayer:bezelRim];
+    }
+    bezelRim.strokeColor = rimColor.CGColor;
+    bezelRim.frame = CGRectMake(0, 0, w, h);
+    bezelRim.mask.frame = bezelRim.bounds;
+    bezelRim.path = rimPath.CGPath;
     [CATransaction commit];
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    [self animateBezelBulgeDepth:15.5 duration:0.26];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesEnded:touches withEvent:event];
+    [self animateBezelBulgeDepth:7.5 duration:0.34];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesCancelled:touches withEvent:event];
+    [self animateBezelBulgeDepth:7.5 duration:0.34];
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
@@ -767,16 +887,21 @@ static void LCApplyScreenScaleNow(void) {
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan:
             _didTriggerSwipeOpen = NO;
+            [self animateBezelBulgeDepth:14.0 duration:0.22];
             break;
         case UIGestureRecognizerStateChanged: {
             if (_didTriggerSwipeOpen) return;
             CGPoint translation = [gesture translationInView:superview];
             CGPoint velocity = [gesture velocityInView:superview];
+            CGFloat pull = self.isPinnedRight ? MAX(0.0, -translation.x) : MAX(0.0, translation.x);
+            CGFloat dynamicDepth = MIN(7.5 + pull * 0.75, 22.0);
+            [self animateBezelBulgeDepth:dynamicDepth duration:0.0];
             BOOL swipedInward = self.isPinnedRight
                 ? (translation.x < -14.0 || velocity.x < -120.0)
                 : (translation.x > 14.0 || velocity.x > 120.0);
             if (swipedInward) {
                 _didTriggerSwipeOpen = YES;
+                [self animateBezelBulgeDepth:7.5 duration:0.30];
                 if (self.onSwipeToOpen) {
                     self.onSwipeToOpen();
                 } else if (self.onTap) {
@@ -788,6 +913,7 @@ static void LCApplyScreenScaleNow(void) {
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled:
             _didTriggerSwipeOpen = NO;
+            [self animateBezelBulgeDepth:7.5 duration:0.34];
             break;
         default:
             break;
@@ -2271,7 +2397,7 @@ static void LCReleaseModalHostWindowIfUnused(void);
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"微珠与网格设置";
+    self.title = @"液态边框与网格设置";
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
                                                                               style:UIBarButtonItemStyleDone
                                                                              target:self
@@ -2314,11 +2440,11 @@ static void LCReleaseModalHostWindowIfUnused(void);
 
 + (NSArray<NSDictionary<NSString *, NSString *> *> *)beadStyleOptions {
     return @[
-        @{@"id": @"minimalLine",  @"title": @"极简光条"},
-        @{@"id": @"glassCapsule", @"title": @"无框毛玻璃"},
-        @{@"id": @"neonGlow",     @"title": @"青紫霓虹"},
-        @{@"id": @"obsidianDot",  @"title": @"黑曜圆珠"},
-        @{@"id": @"auroraPill",   @"title": @"极光液态"}
+        @{@"id": @"minimalLine",  @"title": @"清透冰晶"},
+        @{@"id": @"glassCapsule", @"title": @"柔雾磨砂"},
+        @{@"id": @"neonGlow",     @"title": @"青紫流光"},
+        @{@"id": @"obsidianDot",  @"title": @"烟熏深玻"},
+        @{@"id": @"auroraPill",   @"title": @"极光幻彩"}
     ];
 }
 
@@ -2326,7 +2452,7 @@ static void LCReleaseModalHostWindowIfUnused(void);
     for (NSDictionary<NSString *, NSString *> *opt in [[self class] beadStyleOptions]) {
         if ([opt[@"id"] isEqualToString:styleId]) return opt[@"title"];
     }
-    return @"极简光条";
+    return @"清透冰晶";
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
@@ -2344,17 +2470,17 @@ static void LCReleaseModalHostWindowIfUnused(void);
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    if (section == 0) return @"手势与微珠";
+    if (section == 0) return @"手势与液态边框";
     if (section == 1) return @"抽屉网格布局";
     return @"单开模式";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == 0) {
-        return @"单任务与多任务实时共用；折叠微珠模式下按住微珠 0.5 秒可拖动位置。";
+        return @"单任务与多任务实时共用；按住液态边框 0.5 秒可上下拖动或左右换边。";
     }
     if (section == 1) {
-        return @"参考 LCGridLayout：支持 4/5 列切换与隐藏应用名；抽屉内长按应用图标可置顶收藏或关闭进程。";
+        return @"支持列表与 3/4/5 列切换及隐藏应用名；抽屉内长按应用可直接关闭对应进程。";
     }
     return @"开启后单开应用默认随系统重力感应与竖排锁自由旋转（可在抽屉内按单应用随时切换）。";
 }
@@ -2366,12 +2492,12 @@ static void LCReleaseModalHostWindowIfUnused(void);
     if (indexPath.section == 0) {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"唤出方式";
-            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"折叠微珠", @"边缘手势"]];
+            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"液态边框", @"边缘手势"]];
             seg.selectedSegmentIndex = [_sidebarStyle isEqualToString:@"edgeSwipe"] ? 1 : 0;
             [seg addTarget:self action:@selector(handleSidebarStyleChanged:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = seg;
         } else if (indexPath.row == 1) {
-            cell.textLabel.text = @"微珠样式";
+            cell.textLabel.text = @"液态边框质感";
             UIButton *menuBtn = [UIButton buttonWithType:UIButtonTypeSystem];
             UIButtonConfiguration *cfg = [UIButtonConfiguration plainButtonConfiguration];
             cfg.title = [self titleForBeadStyle:_beadStyle];
@@ -2409,7 +2535,7 @@ static void LCReleaseModalHostWindowIfUnused(void);
             UIStackView *hStack = [[UIStackView alloc] init];
             hStack.axis = UILayoutConstraintAxisHorizontal;
             UILabel *titleLbl = [[UILabel alloc] init];
-            titleLbl.text = @"微珠折叠透明度";
+            titleLbl.text = @"液态边框透明度";
             titleLbl.font = [UIFont systemFontOfSize:16.0];
             UILabel *valLbl = [[UILabel alloc] init];
             valLbl.text = [NSString stringWithFormat:@"%d%%", (int)lroundf((float)_collapsedOpacity * 100.0f)];
@@ -2608,7 +2734,7 @@ static void LCInspectAndAttachNavBarSettingsButtonInVC(UIViewController *vc) {
                 }
             }
             if (!alreadyAdded) {
-                UIBarButtonItem *btn = [[UIBarButtonItem alloc] initWithTitle:@"微珠设置"
+                UIBarButtonItem *btn = [[UIBarButtonItem alloc] initWithTitle:@"边框设置"
                                                                         style:UIBarButtonItemStylePlain
                                                                        target:[LCSwitcherNavBarActionTarget sharedTarget]
                                                                        action:@selector(openBeadSettings)];
@@ -2782,8 +2908,9 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     [self.dimmingMaskView addGestureRecognizer:maskPan];
     [self.view addSubview:self.dimmingMaskView];
 
-    // 2. 侧边抽屉面板
+    // 2. 侧边抽屉面板（默认隐藏收起，避免多任务首次拉起时自动展开）
     self.drawerView = [[LCSwitcherDrawerView alloc] initWithFrame:CGRectZero];
+    self.drawerView.alpha = 0.0;
     __weak typeof(self) weakSelf = self;
     self.drawerView.onClose = ^{
         [weakSelf setDrawerOpen:NO animated:YES];
@@ -2983,9 +3110,9 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     UIEdgeInsets insets = self.view.safeAreaInsets;
     CGFloat safeTop = insets.top > 0 ? insets.top : 44.0;
     CGFloat safeBottom = insets.bottom > 0 ? insets.bottom : 34.0;
-    CGFloat beadW = 7.0;
-    CGFloat beadH = 60.0;
-    CGFloat edgeInset = 2.0;
+    CGFloat beadW = 28.0;
+    CGFloat beadH = 104.0;
+    CGFloat edgeInset = 0.0;
     CGFloat usableHeight = MAX(size.height - safeTop - safeBottom - beadH, 100.0);
 
     CGFloat targetY = safeTop + usableHeight * _beadCenterYRatio;
@@ -3018,9 +3145,9 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     UIEdgeInsets insets = self.view.safeAreaInsets;
     CGFloat safeTop = insets.top > 0 ? insets.top : 44.0;
     CGFloat safeBottom = insets.bottom > 0 ? insets.bottom : 34.0;
-    CGFloat beadW = 7.0;
-    CGFloat beadH = 60.0;
-    CGFloat edgeInset = 2.0;
+    CGFloat beadW = 28.0;
+    CGFloat beadH = 104.0;
+    CGFloat edgeInset = 0.0;
     CGFloat usableHeight = MAX(size.height - safeTop - safeBottom - beadH, 100.0);
 
     CGFloat clampedY = MIN(MAX(center.y, safeTop + beadH / 2.0), size.height - safeBottom - beadH / 2.0);
@@ -4580,12 +4707,20 @@ static void LCActivateMultitaskHostSwitcherIfNeeded(BOOL active) {
         if (!gIsMultitaskHostMode) {
             gIsMultitaskHostMode = YES;
             [LCSwitcher setupIfNeeded];
+            // 每次从主页新启动多任务时强制保持收起态（只露微珠，不自动展开侧边栏）
+            LCSwitcher *mgr = [LCSwitcher sharedManager];
+            if (mgr.overlayController.isDrawerOpen) {
+                [mgr.overlayController setDrawerOpen:NO animated:NO];
+            }
         } else {
             [[LCSwitcher sharedManager] performSetup];
         }
     } else if (gIsMultitaskHostMode && ![LCSwitcher isContainerGuestRunning]) {
         gIsMultitaskHostMode = NO;
         LCSwitcher *mgr = [LCSwitcher sharedManager];
+        if (mgr.overlayController.isDrawerOpen) {
+            [mgr.overlayController setDrawerOpen:NO animated:NO];
+        }
         if (mgr.hostOverlayView) {
             mgr.hostOverlayView.hidden = YES;
         }
