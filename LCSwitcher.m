@@ -3288,6 +3288,7 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
 }
 
 - (void)reloadSharedConfig {
+    [self loadSavedBeadPosition];
     _sharedSidebarStyle = LCSharedSidebarStyle();
     _sharedBeadStyle = LCSharedBeadStyle();
     _sharedCollapsedOpacity = LCSharedCollapsedOpacity();
