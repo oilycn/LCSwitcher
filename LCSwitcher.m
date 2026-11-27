@@ -599,12 +599,15 @@ static void LCApplyScreenScaleNow(void) {
 
 - (void)resetVisualState;
 - (void)applyBeadStyle:(NSString *)style;
+- (void)playIntroBreathingEffect;
+- (void)stopIntroBreathingEffect;
 
 @end
 
 @implementation LCSwitcherBeadView {
     UIView *_grabberBarView;
     BOOL _didTriggerSwipeOpen;
+    BOOL _didPlayIntroBreath;
     NSString *_currentBeadStyle;
 }
 
@@ -711,16 +714,17 @@ static void LCApplyScreenScaleNow(void) {
     CGFloat w = size.width;
     CGFloat h = size.height;
     CGFloat edgeX = right ? w : 0.0;
-    CGFloat peakX = right ? MAX(0.0, w - depth) : MIN(w, depth);
+    CGFloat peakX = right ? MAX(0.5, w - depth) : MIN(w - 0.5, depth);
 
+    // Apple iOS 18/26 侧边按键同款 C2 连续液态高斯钟形弧线：首尾与屏幕黑边绝对相切，中段饱满圆润
     UIBezierPath *path = [UIBezierPath bezierPath];
     [path moveToPoint:CGPointMake(edgeX, 0.0)];
     [path addCurveToPoint:CGPointMake(peakX, h * 0.5)
-            controlPoint1:CGPointMake(edgeX, h * 0.24)
-            controlPoint2:CGPointMake(peakX, h * 0.30)];
+            controlPoint1:CGPointMake(edgeX, h * 0.22)
+            controlPoint2:CGPointMake(peakX, h * 0.34)];
     [path addCurveToPoint:CGPointMake(edgeX, h)
-            controlPoint1:CGPointMake(peakX, h * 0.70)
-            controlPoint2:CGPointMake(edgeX, h * 0.76)];
+            controlPoint1:CGPointMake(peakX, h * 0.66)
+            controlPoint2:CGPointMake(edgeX, h * 0.78)];
     if (!openOnly) {
         [path closePath];
     }
@@ -740,8 +744,8 @@ static void LCApplyScreenScaleNow(void) {
             CASpringAnimation *anim = [CASpringAnimation animationWithKeyPath:@"path"];
             anim.fromValue = (__bridge id)(shape.presentationLayer ? ((CAShapeLayer *)shape.presentationLayer).path : shape.path);
             anim.toValue = (__bridge id)targetPath;
-            anim.damping = 16.0;
-            anim.stiffness = 340.0;
+            anim.damping = 14.0;
+            anim.stiffness = 320.0;
             anim.mass = 0.85;
             anim.duration = duration;
             [shape addAnimation:anim forKey:key];
@@ -749,15 +753,19 @@ static void LCApplyScreenScaleNow(void) {
         shape.path = targetPath;
     };
 
-    UIView *blurHost = [_grabberBarView viewWithTag:9092];
-    if (blurHost && [blurHost.layer.mask isKindOfClass:[CAShapeLayer class]]) {
-        morphShape((CAShapeLayer *)blurHost.layer.mask, fillPath.CGPath, @"bezelMask");
+    UIView *glassHost = [_grabberBarView viewWithTag:9093];
+    if (glassHost && [glassHost.layer.mask isKindOfClass:[CAShapeLayer class]]) {
+        morphShape((CAShapeLayer *)glassHost.layer.mask, fillPath.CGPath, @"bezelGlassMask");
     }
     for (CALayer *sub in _grabberBarView.layer.sublayers) {
-        if ([sub.name isEqualToString:@"lcBezelFill"] && [sub isKindOfClass:[CAShapeLayer class]]) {
-            morphShape((CAShapeLayer *)sub, fillPath.CGPath, @"bezelBulge");
-        } else if ([sub.name isEqualToString:@"lcBezelRim"] && [sub isKindOfClass:[CAShapeLayer class]]) {
-            morphShape((CAShapeLayer *)sub, rimPath.CGPath, @"bezelBulgeRim");
+        if ([sub.name isEqualToString:@"lcBezelShadow"] && [sub isKindOfClass:[CAShapeLayer class]]) {
+            morphShape((CAShapeLayer *)sub, fillPath.CGPath, @"bezelShadow");
+        } else if ([sub.name isEqualToString:@"lcBezelBody"] && [sub.mask isKindOfClass:[CAShapeLayer class]]) {
+            morphShape((CAShapeLayer *)sub.mask, fillPath.CGPath, @"bezelBodyMask");
+        } else if ([sub.name isEqualToString:@"lcBezelDarkRim"] && [sub isKindOfClass:[CAShapeLayer class]]) {
+            morphShape((CAShapeLayer *)sub, rimPath.CGPath, @"bezelDarkRim");
+        } else if ([sub.name isEqualToString:@"lcBezelRimGrad"] && [sub.mask isKindOfClass:[CAShapeLayer class]]) {
+            morphShape((CAShapeLayer *)sub.mask, rimPath.CGPath, @"bezelRimGrad");
         }
     }
 }
@@ -769,104 +777,293 @@ static void LCApplyScreenScaleNow(void) {
 
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
+    CGFloat screenScale = [UIScreen mainScreen].scale;
 
-    // 统一采用透明液态玻璃边框凸起特效（毛玻璃折射 + 玻璃高光内弧）
+    // 清理旧版子视图
     UIView *oldInner = [_grabberBarView viewWithTag:9091];
     if (oldInner) [oldInner removeFromSuperview];
+    UIView *oldBlur = [_grabberBarView viewWithTag:9092];
+    if (oldBlur) [oldBlur removeFromSuperview];
+
     _grabberBarView.frame = CGRectMake(0, 0, w, h);
     _grabberBarView.backgroundColor = [UIColor clearColor];
     _grabberBarView.layer.cornerRadius = 0.0;
 
     NSMutableArray<CALayer *> *toDrop = [NSMutableArray array];
-    CAShapeLayer *bezelFill = nil;
-    CAShapeLayer *bezelRim = nil;
+    CAShapeLayer *bezelShadow = nil;
+    CAGradientLayer *bezelBody = nil;
+    CAShapeLayer *bezelDarkRim = nil;
+    CAGradientLayer *bezelRimGrad = nil;
     for (CALayer *sub in _grabberBarView.layer.sublayers) {
-        if ([sub.name isEqualToString:@"lcAuraOuter"] || [sub.name isEqualToString:@"lcAuraCore"] || [sub.name isEqualToString:@"lcBeadGrad"]) {
+        if ([sub.name isEqualToString:@"lcAuraOuter"] ||
+            [sub.name isEqualToString:@"lcAuraCore"] ||
+            [sub.name isEqualToString:@"lcBeadGrad"] ||
+            [sub.name isEqualToString:@"lcBezelFill"] ||
+            [sub.name isEqualToString:@"lcBezelCore"] ||
+            [sub.name isEqualToString:@"lcBezelBloom"] ||
+            [sub.name isEqualToString:@"lcBezelRim"]) {
             [toDrop addObject:sub];
-        } else if ([sub.name isEqualToString:@"lcBezelFill"]) {
-            bezelFill = (CAShapeLayer *)sub;
-        } else if ([sub.name isEqualToString:@"lcBezelRim"]) {
-            bezelRim = (CAShapeLayer *)sub;
+        } else if ([sub.name isEqualToString:@"lcBezelShadow"]) {
+            bezelShadow = (CAShapeLayer *)sub;
+        } else if ([sub.name isEqualToString:@"lcBezelBody"]) {
+            bezelBody = (CAGradientLayer *)sub;
+        } else if ([sub.name isEqualToString:@"lcBezelDarkRim"]) {
+            bezelDarkRim = (CAShapeLayer *)sub;
+        } else if ([sub.name isEqualToString:@"lcBezelRimGrad"]) {
+            bezelRimGrad = (CAGradientLayer *)sub;
         }
     }
     for (CALayer *sub in toDrop) [sub removeFromSuperlayer];
 
-    UIBezierPath *fillPath = [self bezelBulgePathForSize:CGSizeMake(w, h) depth:7.5 pinnedRight:self.isPinnedRight openCurveOnly:NO];
-    UIBezierPath *rimPath = [self bezelBulgePathForSize:CGSizeMake(w, h) depth:7.5 pinnedRight:self.isPinnedRight openCurveOnly:YES];
+    CGFloat restDepth = 10.5;
+    UIBezierPath *fillPath = [self bezelBulgePathForSize:CGSizeMake(w, h) depth:restDepth pinnedRight:self.isPinnedRight openCurveOnly:NO];
+    UIBezierPath *rimPath = [self bezelBulgePathForSize:CGSizeMake(w, h) depth:restDepth pinnedRight:self.isPinnedRight openCurveOnly:YES];
 
-    // 1. 移除任何 UIVisualEffectView（iOS 26/27 UIGlassEffect 会忽略 layer.mask 导致显露矩形外罩）
-    UIView *oldBlur = [_grabberBarView viewWithTag:9092];
-    if (oldBlur) [oldBlur removeFromSuperview];
+    // 根据质感预设选择真实光学毛玻璃材质（经典 UIBlurEffect 严格遵循父容器 CAShapeLayer 遮罩，零矩形外罩，且随黑白背景实时折射）
+    BOOL isObsidian = [_currentBeadStyle isEqualToString:@"obsidianDot"];
+    UIBlurEffectStyle targetBlurStyle = isObsidian
+        ? UIBlurEffectStyleSystemUltraThinMaterialDark
+        : ([_currentBeadStyle isEqualToString:@"glassCapsule"] ? UIBlurEffectStyleSystemThinMaterial : UIBlurEffectStyleSystemUltraThinMaterial);
 
-    // 2. 纯矢量贝塞尔液态玻璃填充 + 首尾渐隐高光内弧（零矩形边界，黑白背景均自然通透）
-    UIColor *tintColor = [UIColor colorWithWhite:1.0 alpha:0.14];
-    UIColor *rimColor = [UIColor colorWithWhite:1.0 alpha:0.42];
+    NSArray *bodyColors = @[
+        (__bridge id)[UIColor colorWithWhite:0.50 alpha:0.10].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.04].CGColor
+    ];
+    UIColor *darkRimColor = [UIColor colorWithWhite:0.0 alpha:0.20];
+    NSArray *rimGradColors = @[
+        (__bridge id)[UIColor clearColor].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.65].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.96].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.65].CGColor,
+        (__bridge id)[UIColor clearColor].CGColor
+    ];
+
     if ([_currentBeadStyle isEqualToString:@"glassCapsule"]) {
-        tintColor = [UIColor colorWithWhite:0.95 alpha:0.22];
-        rimColor = [UIColor colorWithWhite:1.0 alpha:0.54];
+        bodyColors = @[
+            (__bridge id)[UIColor colorWithWhite:0.45 alpha:0.14].CGColor,
+            (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.06].CGColor
+        ];
+        darkRimColor = [UIColor colorWithWhite:0.0 alpha:0.24];
     } else if ([_currentBeadStyle isEqualToString:@"neonGlow"]) {
-        tintColor = [UIColor colorWithRed:0.25 green:0.75 blue:1.0 alpha:0.18];
-        rimColor = [UIColor colorWithRed:0.42 green:0.86 blue:1.0 alpha:0.65];
-    } else if ([_currentBeadStyle isEqualToString:@"obsidianDot"]) {
-        tintColor = [UIColor colorWithWhite:0.06 alpha:0.32];
-        rimColor = [UIColor colorWithWhite:1.0 alpha:0.28];
-    } else if ([_currentBeadStyle isEqualToString:@"auroraPill"]) {
-        tintColor = [UIColor colorWithRed:0.52 green:0.48 blue:1.0 alpha:0.20];
-        rimColor = [UIColor colorWithRed:0.70 green:0.66 blue:1.0 alpha:0.65];
-    }
-
-    if (!bezelFill) {
-        bezelFill = [CAShapeLayer layer];
-        bezelFill.name = @"lcBezelFill";
-        bezelFill.shadowColor = [UIColor blackColor].CGColor;
-        bezelFill.shadowOpacity = 0.14;
-        bezelFill.shadowRadius = 4.0;
-        bezelFill.shadowOffset = CGSizeZero;
-        [_grabberBarView.layer addSublayer:bezelFill];
-    }
-    bezelFill.fillColor = tintColor.CGColor;
-    bezelFill.frame = CGRectMake(0, 0, w, h);
-    bezelFill.path = fillPath.CGPath;
-
-    if (!bezelRim) {
-        bezelRim = [CAShapeLayer layer];
-        bezelRim.name = @"lcBezelRim";
-        bezelRim.fillColor = [UIColor clearColor].CGColor;
-        bezelRim.lineWidth = 0.85;
-        bezelRim.lineCap = kCALineCapRound;
-        // 上下两端渐隐遮罩：让高光弧线在首尾自然消融进边框，纯黑背景下不露硬线头
-        CAGradientLayer *rimFade = [CAGradientLayer layer];
-        rimFade.colors = @[
+        bodyColors = @[
+            (__bridge id)[UIColor colorWithRed:0.12 green:0.58 blue:0.96 alpha:0.10].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.46 green:0.36 blue:0.96 alpha:0.04].CGColor
+        ];
+        darkRimColor = [UIColor colorWithRed:0.04 green:0.18 blue:0.42 alpha:0.26];
+        rimGradColors = @[
             (__bridge id)[UIColor clearColor].CGColor,
-            (__bridge id)[UIColor whiteColor].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.14 green:0.74 blue:1.0 alpha:0.90].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.58 green:0.88 blue:1.0 alpha:1.0].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.48 green:0.38 blue:1.0 alpha:0.90].CGColor,
             (__bridge id)[UIColor clearColor].CGColor
         ];
-        rimFade.locations = @[@0.0, @0.5, @1.0];
-        rimFade.startPoint = CGPointMake(0.5, 0.0);
-        rimFade.endPoint = CGPointMake(0.5, 1.0);
-        bezelRim.mask = rimFade;
-        [_grabberBarView.layer addSublayer:bezelRim];
+    } else if (isObsidian) {
+        // 烟熏深玻：贴近 iOS 18 硬件实体黑边内凹，白底下极度利落高级
+        bodyColors = @[
+            (__bridge id)[UIColor colorWithWhite:0.02 alpha:0.72].CGColor,
+            (__bridge id)[UIColor colorWithWhite:0.08 alpha:0.48].CGColor
+        ];
+        darkRimColor = [UIColor colorWithWhite:0.0 alpha:0.40];
+        rimGradColors = @[
+            (__bridge id)[UIColor clearColor].CGColor,
+            (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.30].CGColor,
+            (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.55].CGColor,
+            (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.30].CGColor,
+            (__bridge id)[UIColor clearColor].CGColor
+        ];
+    } else if ([_currentBeadStyle isEqualToString:@"auroraPill"]) {
+        // 极光幻彩：真实磨砂折射体 + 极清淡微光内色 + 锐利冷紫极光高光棱边（彻底告别塑料感）
+        bodyColors = @[
+            (__bridge id)[UIColor colorWithRed:0.34 green:0.32 blue:0.62 alpha:0.08].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.60 green:0.46 blue:0.78 alpha:0.03].CGColor
+        ];
+        darkRimColor = [UIColor colorWithRed:0.14 green:0.12 blue:0.32 alpha:0.26];
+        rimGradColors = @[
+            (__bridge id)[UIColor clearColor].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.22 green:0.70 blue:1.0 alpha:0.90].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.58 green:0.44 blue:1.0 alpha:0.98].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.88 green:0.42 blue:0.82 alpha:0.90].CGColor,
+            (__bridge id)[UIColor clearColor].CGColor
+        ];
     }
-    bezelRim.strokeColor = rimColor.CGColor;
-    bezelRim.frame = CGRectMake(0, 0, w, h);
-    bezelRim.mask.frame = bezelRim.bounds;
-    bezelRim.path = rimPath.CGPath;
+
+    // Layer 1: 贴边接触微影（极紧致 2pt 阴影，白底托出玻璃立体厚度）
+    if (!bezelShadow) {
+        bezelShadow = [CAShapeLayer layer];
+        bezelShadow.name = @"lcBezelShadow";
+        bezelShadow.contentsScale = screenScale;
+        bezelShadow.fillColor = [UIColor colorWithWhite:0.0 alpha:0.04].CGColor;
+        bezelShadow.shadowColor = [UIColor blackColor].CGColor;
+        bezelShadow.shadowOpacity = 0.22;
+        bezelShadow.shadowRadius = 2.4;
+        bezelShadow.shadowOffset = CGSizeZero;
+        [_grabberBarView.layer insertSublayer:bezelShadow atIndex:0];
+    }
+    bezelShadow.frame = CGRectMake(0, 0, w, h);
+    bezelShadow.path = fillPath.CGPath;
+
+    // Layer 2: 真实实时光学毛玻璃折射容器（父容器由精确贝塞尔 CAShapeLayer 裁剪，零矩形痕迹）
+    UIView *glassHost = [_grabberBarView viewWithTag:9093];
+    if (!glassHost) {
+        glassHost = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, h)];
+        glassHost.tag = 9093;
+        glassHost.userInteractionEnabled = NO;
+        glassHost.backgroundColor = [UIColor clearColor];
+        UIVisualEffectView *blurV = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:targetBlurStyle]];
+        blurV.tag = 9094;
+        blurV.frame = glassHost.bounds;
+        blurV.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [glassHost addSubview:blurV];
+        CAShapeLayer *glassMask = [CAShapeLayer layer];
+        glassMask.contentsScale = screenScale;
+        glassMask.fillColor = [UIColor whiteColor].CGColor;
+        glassHost.layer.mask = glassMask;
+        [_grabberBarView addSubview:glassHost];
+    }
+    glassHost.frame = CGRectMake(0, 0, w, h);
+    UIVisualEffectView *blurV = (UIVisualEffectView *)[glassHost viewWithTag:9094];
+    if (blurV) {
+        blurV.effect = [UIBlurEffect effectWithStyle:targetBlurStyle];
+    }
+    glassHost.layer.mask.frame = glassHost.bounds;
+    ((CAShapeLayer *)glassHost.layer.mask).path = fillPath.CGPath;
+
+    // Layer 3: 轻透表面光泽渐变（叠加于真实毛玻璃之上，提供前 3 秒内部呼吸载体）
+    if (!bezelBody) {
+        bezelBody = [CAGradientLayer layer];
+        bezelBody.name = @"lcBezelBody";
+        bezelBody.contentsScale = screenScale;
+        CAShapeLayer *bodyMask = [CAShapeLayer layer];
+        bodyMask.contentsScale = screenScale;
+        bodyMask.fillColor = [UIColor whiteColor].CGColor;
+        bezelBody.mask = bodyMask;
+        [_grabberBarView.layer addSublayer:bezelBody];
+    }
+    bezelBody.frame = CGRectMake(0, 0, w, h);
+    bezelBody.colors = bodyColors;
+    bezelBody.startPoint = self.isPinnedRight ? CGPointMake(1.0, 0.5) : CGPointMake(0.0, 0.5);
+    bezelBody.endPoint = self.isPinnedRight ? CGPointMake(0.0, 0.5) : CGPointMake(1.0, 0.5);
+    bezelBody.mask.frame = bezelBody.bounds;
+    ((CAShapeLayer *)bezelBody.mask).path = fillPath.CGPath;
+
+    // Layer 4: 1.0pt 锐利暗色蚀刻细边（白底勾勒利落玻璃切面，黑底自动隐形）
+    if (!bezelDarkRim) {
+        bezelDarkRim = [CAShapeLayer layer];
+        bezelDarkRim.name = @"lcBezelDarkRim";
+        bezelDarkRim.contentsScale = screenScale;
+        bezelDarkRim.fillColor = [UIColor clearColor].CGColor;
+        bezelDarkRim.lineWidth = 1.05;
+        bezelDarkRim.lineCap = kCALineCapRound;
+        CAGradientLayer *darkFade = [CAGradientLayer layer];
+        darkFade.contentsScale = screenScale;
+        darkFade.colors = @[
+            (__bridge id)[UIColor clearColor].CGColor,
+            (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.65].CGColor,
+            (__bridge id)[UIColor whiteColor].CGColor,
+            (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.65].CGColor,
+            (__bridge id)[UIColor clearColor].CGColor
+        ];
+        darkFade.locations = @[@0.04, @0.22, @0.50, @0.78, @0.96];
+        darkFade.startPoint = CGPointMake(0.5, 0.0);
+        darkFade.endPoint = CGPointMake(0.5, 1.0);
+        bezelDarkRim.mask = darkFade;
+        [_grabberBarView.layer addSublayer:bezelDarkRim];
+    }
+    bezelDarkRim.strokeColor = darkRimColor.CGColor;
+    bezelDarkRim.frame = CGRectMake(0, 0, w, h);
+    bezelDarkRim.mask.frame = bezelDarkRim.bounds;
+    bezelDarkRim.path = rimPath.CGPath;
+
+    // Layer 5: 0.9pt Retina 晶体高光棱边（黑底亮白/极光流光，白底与暗边构成双层玻璃倒角）
+    if (!bezelRimGrad) {
+        bezelRimGrad = [CAGradientLayer layer];
+        bezelRimGrad.name = @"lcBezelRimGrad";
+        bezelRimGrad.contentsScale = screenScale;
+        bezelRimGrad.locations = @[@0.04, @0.24, @0.50, @0.76, @0.96];
+        bezelRimGrad.startPoint = CGPointMake(0.5, 0.0);
+        bezelRimGrad.endPoint = CGPointMake(0.5, 1.0);
+        CAShapeLayer *rimMask = [CAShapeLayer layer];
+        rimMask.contentsScale = screenScale;
+        rimMask.fillColor = [UIColor clearColor].CGColor;
+        rimMask.strokeColor = [UIColor whiteColor].CGColor;
+        rimMask.lineWidth = 0.9;
+        rimMask.lineCap = kCALineCapRound;
+        bezelRimGrad.mask = rimMask;
+        [_grabberBarView.layer addSublayer:bezelRimGrad];
+    }
+    bezelRimGrad.colors = rimGradColors;
+    bezelRimGrad.frame = CGRectMake(0, 0, w, h);
+    bezelRimGrad.mask.frame = bezelRimGrad.bounds;
+    ((CAShapeLayer *)bezelRimGrad.mask).path = rimPath.CGPath;
     [CATransaction commit];
+
+    if (!_didPlayIntroBreath && w > 0 && h > 0 && self.window != nil) {
+        _didPlayIntroBreath = YES;
+        [self playIntroBreathingEffect];
+    }
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window != nil && !_didPlayIntroBreath && _grabberBarView.bounds.size.width > 0) {
+        _didPlayIntroBreath = YES;
+        [self playIntroBreathingEffect];
+    }
+}
+
+- (void)playIntroBreathingEffect {
+    [self stopIntroBreathingEffect];
+
+    NSArray<CAMediaTimingFunction *> *eases = @[
+        [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut],
+        [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut],
+        [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut],
+        [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]
+    ];
+    NSArray<NSNumber *> *times = @[@0.0, @0.25, @0.50, @0.75, @1.0];
+
+    // 仅在前 3 秒内对弧线内部渐变体与棱镜高光弧执行 2 个周期的柔和透明度呼吸（每周期 1.5s，3 秒后自动静止）
+    for (CALayer *sub in _grabberBarView.layer.sublayers) {
+        if ([sub.name isEqualToString:@"lcBezelBody"]) {
+            CAKeyframeAnimation *anim = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+            anim.values = @[@1.0, @0.18, @1.0, @0.18, @1.0];
+            anim.keyTimes = times;
+            anim.timingFunctions = eases;
+            anim.duration = 3.0;
+            anim.removedOnCompletion = YES;
+            [sub addAnimation:anim forKey:@"lcIntroBreath"];
+        } else if ([sub.name isEqualToString:@"lcBezelRimGrad"]) {
+            CAKeyframeAnimation *anim = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+            anim.values = @[@1.0, @0.52, @1.0, @0.52, @1.0];
+            anim.keyTimes = times;
+            anim.timingFunctions = eases;
+            anim.duration = 3.0;
+            anim.removedOnCompletion = YES;
+            [sub addAnimation:anim forKey:@"lcIntroBreath"];
+        }
+    }
+}
+
+- (void)stopIntroBreathingEffect {
+    for (CALayer *sub in _grabberBarView.layer.sublayers) {
+        [sub removeAnimationForKey:@"lcIntroBreath"];
+    }
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesBegan:touches withEvent:event];
-    [self animateBezelBulgeDepth:15.5 duration:0.26];
+    [self stopIntroBreathingEffect];
+    [self animateBezelBulgeDepth:18.0 duration:0.26];
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesEnded:touches withEvent:event];
-    [self animateBezelBulgeDepth:7.5 duration:0.34];
+    [self animateBezelBulgeDepth:10.5 duration:0.36];
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesCancelled:touches withEvent:event];
-    [self animateBezelBulgeDepth:7.5 duration:0.34];
+    [self animateBezelBulgeDepth:10.5 duration:0.36];
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
@@ -887,21 +1084,21 @@ static void LCApplyScreenScaleNow(void) {
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan:
             _didTriggerSwipeOpen = NO;
-            [self animateBezelBulgeDepth:14.0 duration:0.22];
+            [self animateBezelBulgeDepth:15.0 duration:0.22];
             break;
         case UIGestureRecognizerStateChanged: {
             if (_didTriggerSwipeOpen) return;
             CGPoint translation = [gesture translationInView:superview];
             CGPoint velocity = [gesture velocityInView:superview];
             CGFloat pull = self.isPinnedRight ? MAX(0.0, -translation.x) : MAX(0.0, translation.x);
-            CGFloat dynamicDepth = MIN(7.5 + pull * 0.75, 22.0);
+            CGFloat dynamicDepth = MIN(10.5 + pull * 0.78, 26.0);
             [self animateBezelBulgeDepth:dynamicDepth duration:0.0];
             BOOL swipedInward = self.isPinnedRight
                 ? (translation.x < -14.0 || velocity.x < -120.0)
                 : (translation.x > 14.0 || velocity.x > 120.0);
             if (swipedInward) {
                 _didTriggerSwipeOpen = YES;
-                [self animateBezelBulgeDepth:7.5 duration:0.30];
+                [self animateBezelBulgeDepth:10.5 duration:0.32];
                 if (self.onSwipeToOpen) {
                     self.onSwipeToOpen();
                 } else if (self.onTap) {
@@ -913,7 +1110,7 @@ static void LCApplyScreenScaleNow(void) {
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled:
             _didTriggerSwipeOpen = NO;
-            [self animateBezelBulgeDepth:7.5 duration:0.34];
+            [self animateBezelBulgeDepth:10.5 duration:0.36];
             break;
         default:
             break;
@@ -1400,8 +1597,11 @@ static void LCApplyScreenScaleNow(void) {
 @end
 
 @implementation LCSwitcherDrawerView {
+    UIView *_contentContainerView;
     UIVisualEffectView *_blurView;
     CAGradientLayer *_glassSheenLayer;
+    CAGradientLayer *_borderGradientLayer;
+    CAShapeLayer *_borderMaskLayer;
     UIView *_headerView;
     UIView *_statusPill;
     UIView *_statusDot;
@@ -1445,77 +1645,102 @@ static void LCApplyScreenScaleNow(void) {
     [super layoutSubviews];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    _glassSheenLayer.frame = self.bounds;
+    _contentContainerView.frame = self.bounds;
+    _glassSheenLayer.frame = _contentContainerView.bounds;
+    _borderGradientLayer.frame = _contentContainerView.bounds;
+    CGRect borderRect = CGRectInset(_contentContainerView.bounds, 0.5, 0.5);
+    _borderMaskLayer.path = [UIBezierPath bezierPathWithRoundedRect:borderRect cornerRadius:31.5].CGPath;
+    self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:32.0].CGPath;
     [CATransaction commit];
 }
 
 - (void)setupUI {
-    self.clipsToBounds = YES;
-    self.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.13 alpha:0.32];
+    // 外层不裁剪以完整渲染浮动柔影；所有内容放入内层 32pt 连续圆角玻璃容器
+    self.clipsToBounds = NO;
+    self.backgroundColor = [UIColor clearColor];
     self.autoresizingMask = UIViewAutoresizingNone;
+    self.layer.shadowColor = [UIColor blackColor].CGColor;
+    self.layer.shadowOpacity = 0.42;
+    self.layer.shadowRadius = 32.0;
+    self.layer.shadowOffset = CGSizeMake(0, 14);
+
+    _contentContainerView = [[UIView alloc] initWithFrame:self.bounds];
+    _contentContainerView.clipsToBounds = YES;
+    _contentContainerView.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.11 alpha:0.24];
+    _contentContainerView.layer.cornerRadius = 32.0;
+    _contentContainerView.layer.cornerCurve = kCACornerCurveContinuous;
+    [self addSubview:_contentContainerView];
 
     UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark];
     _blurView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
-    _blurView.frame = self.bounds;
+    _blurView.frame = _contentContainerView.bounds;
     _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self addSubview:_blurView];
+    [_contentContainerView addSubview:_blurView];
 
-    // Liquid Glass 顶部高光漫反射层
+    // Liquid Glass 顶部斜向漫反射高光层
     _glassSheenLayer = [CAGradientLayer layer];
     _glassSheenLayer.colors = @[
-        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.16].CGColor,
-        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.04].CGColor,
-        (__bridge id)[UIColor colorWithWhite:0.0 alpha:0.06].CGColor
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.14].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.03].CGColor,
+        (__bridge id)[UIColor clearColor].CGColor
     ];
-    _glassSheenLayer.locations = @[@0.0, @0.38, @1.0];
-    _glassSheenLayer.startPoint = CGPointMake(0.1, 0.0);
-    _glassSheenLayer.endPoint = CGPointMake(0.9, 1.0);
-    [self.layer addSublayer:_glassSheenLayer];
+    _glassSheenLayer.locations = @[@0.0, @0.32, @1.0];
+    _glassSheenLayer.startPoint = CGPointMake(0.05, 0.0);
+    _glassSheenLayer.endPoint = CGPointMake(0.95, 1.0);
+    [_contentContainerView.layer addSublayer:_glassSheenLayer];
 
-    self.layer.cornerRadius = 28.0;
-    self.layer.cornerCurve = kCACornerCurveContinuous;
-    self.layer.borderWidth = 0.35;
-    self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.14].CGColor;
-    self.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.layer.shadowOpacity = 0.42;
-    self.layer.shadowRadius = 26.0;
-    self.layer.shadowOffset = CGSizeMake(0, 10);
-
-    // 1. 极简无顶栏、无中间嵌套层设计：应用卡片直接铺陈在液态玻璃面板内，干脆通透
+    // 1. 全出血通透滚动列表：上下直接以外层 32pt 玻璃边界裁剪，绝无任何内部横线截断边界
     _scrollView = [[UIScrollView alloc] init];
     _scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     _scrollView.showsVerticalScrollIndicator = NO;
     _scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     _scrollView.alwaysBounceVertical = YES;
-    _scrollView.contentInset = UIEdgeInsetsMake(4.0, 0, 6.0, 0);
-    [self addSubview:_scrollView];
+    _scrollView.contentInset = UIEdgeInsetsMake(14.0, 0.0, 76.0, 0.0);
+    [_contentContainerView addSubview:_scrollView];
 
     _stackView = [[UIStackView alloc] init];
     _stackView.translatesAutoresizingMaskIntoConstraints = NO;
     _stackView.axis = UILayoutConstraintAxisVertical;
-    _stackView.spacing = 10.0;
+    _stackView.spacing = 8.0;
     _stackView.alignment = UIStackViewAlignmentFill;
     _stackView.distribution = UIStackViewDistributionFill;
     [_scrollView addSubview:_stackView];
 
     [self setupControlsPanel];
-    [self addSubview:_controlsPanel];
+    [_contentContainerView addSubview:_controlsPanel];
+
+    // 外圈方向性高光折射边框（左上受光最亮，右下柔和回光，置于最顶层）
+    _borderGradientLayer = [CAGradientLayer layer];
+    _borderGradientLayer.colors = @[
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.42].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.10].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.24].CGColor
+    ];
+    _borderGradientLayer.locations = @[@0.0, @0.48, @1.0];
+    _borderGradientLayer.startPoint = CGPointMake(0.0, 0.0);
+    _borderGradientLayer.endPoint = CGPointMake(1.0, 1.0);
+    _borderMaskLayer = [CAShapeLayer layer];
+    _borderMaskLayer.fillColor = [UIColor clearColor].CGColor;
+    _borderMaskLayer.strokeColor = [UIColor whiteColor].CGColor;
+    _borderMaskLayer.lineWidth = 1.0;
+    _borderGradientLayer.mask = _borderMaskLayer;
+    [_contentContainerView.layer addSublayer:_borderGradientLayer];
 
     [NSLayoutConstraint activateConstraints:@[
-        [_scrollView.topAnchor constraintEqualToAnchor:self.topAnchor constant:12.0],
-        [_scrollView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12.0],
-        [_scrollView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12.0],
-        [_scrollView.bottomAnchor constraintEqualToAnchor:_controlsPanel.topAnchor constant:-10.0],
+        [_scrollView.topAnchor constraintEqualToAnchor:_contentContainerView.topAnchor],
+        [_scrollView.leadingAnchor constraintEqualToAnchor:_contentContainerView.leadingAnchor],
+        [_scrollView.trailingAnchor constraintEqualToAnchor:_contentContainerView.trailingAnchor],
+        [_scrollView.bottomAnchor constraintEqualToAnchor:_contentContainerView.bottomAnchor],
 
-        [_controlsPanel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12.0],
-        [_controlsPanel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12.0],
-        [_controlsPanel.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-12.0],
+        [_controlsPanel.leadingAnchor constraintEqualToAnchor:_contentContainerView.leadingAnchor constant:11.0],
+        [_controlsPanel.trailingAnchor constraintEqualToAnchor:_contentContainerView.trailingAnchor constant:-11.0],
+        [_controlsPanel.bottomAnchor constraintEqualToAnchor:_contentContainerView.bottomAnchor constant:-11.0],
 
         [_stackView.topAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.topAnchor],
-        [_stackView.leadingAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.leadingAnchor],
-        [_stackView.trailingAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.trailingAnchor],
+        [_stackView.leadingAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.leadingAnchor constant:12.0],
+        [_stackView.trailingAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.trailingAnchor constant:-12.0],
         [_stackView.bottomAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.bottomAnchor],
-        [_stackView.widthAnchor constraintEqualToAnchor:_scrollView.frameLayoutGuide.widthAnchor]
+        [_stackView.widthAnchor constraintEqualToAnchor:_scrollView.frameLayoutGuide.widthAnchor constant:-24.0]
     ]];
 }
 
@@ -1536,8 +1761,8 @@ static void LCApplyScreenScaleNow(void) {
                                           action:(SEL)action {
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.translatesAutoresizingMaskIntoConstraints = NO;
-    btn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.09];
-    btn.layer.cornerRadius = 14.0;
+    btn.backgroundColor = [UIColor clearColor];
+    btn.layer.cornerRadius = 15.0;
     btn.layer.cornerCurve = kCACornerCurveContinuous;
     btn.layer.borderWidth = 0.0;
     btn.accessibilityLabel = title;
@@ -1545,7 +1770,7 @@ static void LCApplyScreenScaleNow(void) {
     [btn addTarget:self action:@selector(handleTileTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
     [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
 
-    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:16.5 weight:UIImageSymbolWeightSemibold];
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:16.0 weight:UIImageSymbolWeightSemibold];
     UIImageView *iv = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:symbolName withConfiguration:cfg]];
     iv.translatesAutoresizingMaskIntoConstraints = NO;
     iv.userInteractionEnabled = NO;
@@ -1556,11 +1781,11 @@ static void LCApplyScreenScaleNow(void) {
     if (outTitleLabel) *outTitleLabel = nil;
 
     [NSLayoutConstraint activateConstraints:@[
-        [btn.heightAnchor constraintEqualToConstant:40.0],
+        [btn.heightAnchor constraintEqualToConstant:38.0],
         [iv.centerXAnchor constraintEqualToAnchor:btn.centerXAnchor],
         [iv.centerYAnchor constraintEqualToAnchor:btn.centerYAnchor],
-        [iv.widthAnchor constraintEqualToConstant:20.0],
-        [iv.heightAnchor constraintEqualToConstant:20.0]
+        [iv.widthAnchor constraintEqualToConstant:19.0],
+        [iv.heightAnchor constraintEqualToConstant:19.0]
     ]];
     return btn;
 }
@@ -1587,15 +1812,21 @@ static void LCApplyScreenScaleNow(void) {
         [_controlsStack.bottomAnchor constraintEqualToAnchor:_controlsPanel.bottomAnchor]
     ]];
 
-    // 1. 可展开缩放滑块条（默认隐藏，点击底部“缩放”按钮后展开）
+    // 1. 悬浮液态玻璃缩放胶囊（默认隐藏，点击底部“缩放”按钮后轻盈弹开）
     _scalePopoverBar = [[UIView alloc] init];
     _scalePopoverBar.translatesAutoresizingMaskIntoConstraints = NO;
-    _scalePopoverBar.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
-    _scalePopoverBar.layer.cornerRadius = 14.0;
+    _scalePopoverBar.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.14 alpha:0.68];
+    _scalePopoverBar.layer.cornerRadius = 18.0;
     _scalePopoverBar.layer.cornerCurve = kCACornerCurveContinuous;
-    _scalePopoverBar.layer.borderWidth = 0.0;
+    _scalePopoverBar.layer.borderWidth = 0.6;
+    _scalePopoverBar.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
+    _scalePopoverBar.clipsToBounds = YES;
     _scalePopoverBar.hidden = YES;
     _scalePopoverBar.alpha = 0.0;
+    UIVisualEffectView *scaleBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark]];
+    scaleBlur.frame = _scalePopoverBar.bounds;
+    scaleBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [_scalePopoverBar addSubview:scaleBlur];
     [_controlsStack addArrangedSubview:_scalePopoverBar];
 
     UILabel *minLbl = [[UILabel alloc] init];
@@ -1668,14 +1899,36 @@ static void LCApplyScreenScaleNow(void) {
         [presetStack.heightAnchor constraintEqualToConstant:24.0]
     ]];
 
-    // 2. 底部功能按钮栏（主页 · 缩放 · 画中画 · [单任务旋转]）
+    // 2. 悬浮液态玻璃胶囊底部 Dock（主页 · 缩放 · 画中画 · 全屏/旋转 · 设置）
+    _bottomDockContainer = [[UIView alloc] init];
+    _bottomDockContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    _bottomDockContainer.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.12 alpha:0.62];
+    _bottomDockContainer.layer.cornerRadius = 22.0;
+    _bottomDockContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    _bottomDockContainer.layer.borderWidth = 0.65;
+    _bottomDockContainer.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
+    _bottomDockContainer.clipsToBounds = YES;
+    UIVisualEffectView *dockBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark]];
+    dockBlur.frame = _bottomDockContainer.bounds;
+    dockBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [_bottomDockContainer addSubview:dockBlur];
+    [_controlsStack addArrangedSubview:_bottomDockContainer];
+
     _bottomButtonsStack = [[UIStackView alloc] init];
     _bottomButtonsStack.translatesAutoresizingMaskIntoConstraints = NO;
     _bottomButtonsStack.axis = UILayoutConstraintAxisHorizontal;
-    _bottomButtonsStack.spacing = 6.0;
-    _bottomButtonsStack.alignment = UIStackViewAlignmentFill;
+    _bottomButtonsStack.spacing = 4.0;
+    _bottomButtonsStack.alignment = UIStackViewAlignmentCenter;
     _bottomButtonsStack.distribution = UIStackViewDistributionFillEqually;
-    [_controlsStack addArrangedSubview:_bottomButtonsStack];
+    [_bottomDockContainer addSubview:_bottomButtonsStack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_bottomDockContainer.heightAnchor constraintEqualToConstant:48.0],
+        [_bottomButtonsStack.leadingAnchor constraintEqualToAnchor:_bottomDockContainer.leadingAnchor constant:6.0],
+        [_bottomButtonsStack.trailingAnchor constraintEqualToAnchor:_bottomDockContainer.trailingAnchor constant:-6.0],
+        [_bottomButtonsStack.topAnchor constraintEqualToAnchor:_bottomDockContainer.topAnchor constant:5.0],
+        [_bottomButtonsStack.bottomAnchor constraintEqualToAnchor:_bottomDockContainer.bottomAnchor constant:-5.0]
+    ]];
 
     _homeActionButton = [self createBottomActionButtonWithSymbol:@"house.fill"
                                                            title:@"主页"
@@ -1737,7 +1990,8 @@ static void LCApplyScreenScaleNow(void) {
     if (expand) _scalePopoverBar.hidden = NO;
     [UIView animateWithDuration:0.24 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.4 options:UIViewAnimationOptionCurveEaseInOut animations:^{
         self->_scalePopoverBar.alpha = expand ? 1.0 : 0.0;
-        self->_scaleActionButton.backgroundColor = expand ? [[UIColor systemIndigoColor] colorWithAlphaComponent:0.35] : [UIColor colorWithWhite:1.0 alpha:0.10];
+        self->_scaleActionButton.backgroundColor = expand ? [[UIColor systemIndigoColor] colorWithAlphaComponent:0.35] : [UIColor clearColor];
+        self->_scrollView.contentInset = UIEdgeInsetsMake(14.0, 0.0, expand ? 154.0 : 76.0, 0.0);
         [self layoutIfNeeded];
     } completion:^(BOOL finished) {
         if (!self->_isScalePopoverOpen) {
@@ -1757,8 +2011,7 @@ static void LCApplyScreenScaleNow(void) {
 
 - (void)setAutoRotateEnabled:(BOOL)enabled {
     _isAutoRotateOn = enabled;
-    _rotateActionButton.backgroundColor = enabled ? [[UIColor systemGreenColor] colorWithAlphaComponent:0.32] : [UIColor colorWithWhite:1.0 alpha:0.10];
-    _rotateActionButton.layer.borderColor = enabled ? [[UIColor systemGreenColor] colorWithAlphaComponent:0.65].CGColor : [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
+    _rotateActionButton.backgroundColor = enabled ? [[UIColor systemGreenColor] colorWithAlphaComponent:0.30] : [UIColor clearColor];
     _rotateActionTitleLabel.text = enabled ? @"旋转中" : @"旋转";
 }
 
@@ -1780,8 +2033,7 @@ static void LCApplyScreenScaleNow(void) {
 }
 
 - (void)setTrueFullscreenActive:(BOOL)active {
-    _fullscreenActionButton.backgroundColor = active ? [[UIColor systemOrangeColor] colorWithAlphaComponent:0.34] : [UIColor colorWithWhite:1.0 alpha:0.10];
-    _fullscreenActionButton.layer.borderColor = active ? [[UIColor systemOrangeColor] colorWithAlphaComponent:0.70].CGColor : [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
+    _fullscreenActionButton.backgroundColor = active ? [[UIColor systemOrangeColor] colorWithAlphaComponent:0.30] : [UIColor clearColor];
     _fullscreenActionTitleLabel.text = active ? @"退出全屏" : @"全屏";
 }
 
@@ -1846,8 +2098,7 @@ static void LCApplyScreenScaleNow(void) {
 }
 
 - (void)setPiPActive:(BOOL)active {
-    _pipActionButton.backgroundColor = active ? [[UIColor systemTealColor] colorWithAlphaComponent:0.35] : [UIColor colorWithWhite:1.0 alpha:0.10];
-    _pipActionButton.layer.borderColor = active ? [[UIColor systemTealColor] colorWithAlphaComponent:0.65].CGColor : [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
+    _pipActionButton.backgroundColor = active ? [[UIColor systemTealColor] colorWithAlphaComponent:0.32] : [UIColor clearColor];
     _pipActionTitleLabel.text = active ? @"退出画中画" : @"画中画";
 }
 
@@ -1980,19 +2231,19 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
 
 - (void)playEntranceWaveFromRight:(BOOL)fromRight {
     NSArray<UIView *> *rows = _stackView.arrangedSubviews;
-    CGFloat dx = fromRight ? 18.0 : -18.0;
+    CGFloat dx = fromRight ? 34.0 : -34.0;
     for (NSUInteger i = 0; i < rows.count; i++) {
         UIView *row = rows[i];
         row.alpha = 0.0;
         row.transform = CGAffineTransformConcat(
-            CGAffineTransformMakeScale(0.93, 0.93),
-            CGAffineTransformMakeTranslation(dx, 4.0)
+            CGAffineTransformMakeScale(0.84, 0.84),
+            CGAffineTransformMakeTranslation(dx, 8.0)
         );
-        NSTimeInterval delay = MIN(i * 0.022, 0.18);
-        [UIView animateWithDuration:0.34
+        NSTimeInterval delay = MIN(i * 0.026, 0.20);
+        [UIView animateWithDuration:0.46
                               delay:delay
-             usingSpringWithDamping:0.78
-              initialSpringVelocity:0.65
+             usingSpringWithDamping:0.68
+              initialSpringVelocity:0.85
                             options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseOut
                          animations:^{
             row.alpha = 1.0;
@@ -2004,39 +2255,43 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
 - (UIView *)createGlassListRowWithApp:(LCSwitcherAppInfo *)app isForeground:(BOOL)isForeground isRunning:(BOOL)isRunning isPinned:(BOOL)isPinned {
     UIButton *card = [UIButton buttonWithType:UIButtonTypeCustom];
     card.translatesAutoresizingMaskIntoConstraints = NO;
-    card.layer.borderWidth = 0.0;
+    card.layer.borderWidth = 0.55;
     if (isForeground) {
-        card.backgroundColor = [UIColor colorWithRed:0.16 green:0.78 blue:0.42 alpha:0.18];
+        card.backgroundColor = [UIColor colorWithRed:0.14 green:0.80 blue:0.44 alpha:0.16];
+        card.layer.borderColor = [UIColor colorWithRed:0.30 green:0.94 blue:0.56 alpha:0.36].CGColor;
     } else if (isRunning) {
-        card.backgroundColor = [UIColor colorWithRed:0.24 green:0.66 blue:1.0 alpha:0.13];
+        card.backgroundColor = [UIColor colorWithRed:0.22 green:0.66 blue:1.0 alpha:0.12];
+        card.layer.borderColor = [UIColor colorWithRed:0.44 green:0.82 blue:1.0 alpha:0.26].CGColor;
     } else {
-        card.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.055];
+        card.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+        card.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.09].CGColor;
     }
-    card.layer.cornerRadius = 15.0;
+    card.layer.cornerRadius = 18.0;
     card.layer.cornerCurve = kCACornerCurveContinuous;
 
     UIImage *rawIcon = app.icon ?: [UIImage systemImageNamed:@"app.fill"];
     UIImageView *iconView = [[UIImageView alloc] initWithImage:rawIcon];
-    iconView.alpha = isRunning ? 1.0 : 0.90;
+    iconView.alpha = isRunning ? 1.0 : 0.92;
     iconView.contentMode = UIViewContentModeScaleAspectFill;
-    iconView.layer.cornerRadius = 9.5;
+    iconView.layer.cornerRadius = 10.5;
     iconView.layer.cornerCurve = kCACornerCurveContinuous;
     iconView.clipsToBounds = YES;
-    iconView.layer.borderWidth = 0.0;
+    iconView.layer.borderWidth = 0.5;
+    iconView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
     iconView.translatesAutoresizingMaskIntoConstraints = NO;
     iconView.userInteractionEnabled = NO;
     [card addSubview:iconView];
 
     UIStackView *textStack = [[UIStackView alloc] init];
     textStack.axis = UILayoutConstraintAxisVertical;
-    textStack.spacing = 1.5;
+    textStack.spacing = 2.0;
     textStack.translatesAutoresizingMaskIntoConstraints = NO;
     textStack.userInteractionEnabled = NO;
 
     UILabel *nameLabel = [[UILabel alloc] init];
     nameLabel.text = app.name;
-    nameLabel.font = [UIFont systemFontOfSize:13.5 weight:(isForeground ? UIFontWeightBold : UIFontWeightSemibold)];
-    nameLabel.textColor = isRunning ? [UIColor whiteColor] : [UIColor colorWithWhite:1.0 alpha:0.86];
+    nameLabel.font = [UIFont systemFontOfSize:14.0 weight:(isForeground ? UIFontWeightBold : UIFontWeightSemibold)];
+    nameLabel.textColor = isRunning ? [UIColor whiteColor] : [UIColor colorWithWhite:1.0 alpha:0.90];
     nameLabel.numberOfLines = 1;
     nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
 
@@ -2119,17 +2374,17 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
     }
 
     [NSLayoutConstraint activateConstraints:@[
-        [card.heightAnchor constraintEqualToConstant:52.0],
-        [iconView.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:9.0],
+        [card.heightAnchor constraintEqualToConstant:56.0],
+        [iconView.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:10.0],
         [iconView.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
-        [iconView.widthAnchor constraintEqualToConstant:35.0],
-        [iconView.heightAnchor constraintEqualToConstant:35.0],
+        [iconView.widthAnchor constraintEqualToConstant:38.0],
+        [iconView.heightAnchor constraintEqualToConstant:38.0],
 
-        [textStack.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:10.0],
+        [textStack.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:11.0],
         [textStack.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
         [textStack.trailingAnchor constraintLessThanOrEqualToAnchor:trailingView.leadingAnchor constant:-8.0],
 
-        [trailingView.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12.0],
+        [trailingView.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-13.0],
         [trailingView.centerYAnchor constraintEqualToAnchor:card.centerYAnchor]
     ]];
 
@@ -3110,8 +3365,8 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     UIEdgeInsets insets = self.view.safeAreaInsets;
     CGFloat safeTop = insets.top > 0 ? insets.top : 44.0;
     CGFloat safeBottom = insets.bottom > 0 ? insets.bottom : 34.0;
-    CGFloat beadW = 28.0;
-    CGFloat beadH = 104.0;
+    CGFloat beadW = 30.0;
+    CGFloat beadH = 96.0;
     CGFloat edgeInset = 0.0;
     CGFloat usableHeight = MAX(size.height - safeTop - safeBottom - beadH, 100.0);
 
@@ -3131,12 +3386,14 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     CGFloat drawerY = safeTop + (size.height - safeTop - safeBottom - drawerH) / 2.0;
     CGFloat drawerActualW = MIN(isListMode ? 260.0 : 296.0, size.width - 28.0);
 
-    if (self.isDrawerOpen) {
-        CGFloat drawerX = _isBeadPinnedRight ? (size.width - drawerActualW - 10.0) : 10.0;
-        self.drawerView.frame = CGRectMake(drawerX, drawerY, drawerActualW, drawerH);
-    } else {
-        CGFloat drawerHiddenX = _isBeadPinnedRight ? (size.width + 24.0) : (-drawerActualW - 24.0);
-        self.drawerView.frame = CGRectMake(drawerHiddenX, drawerY, drawerActualW, drawerH);
+    if (CGAffineTransformIsIdentity(self.drawerView.transform)) {
+        if (self.isDrawerOpen) {
+            CGFloat drawerX = _isBeadPinnedRight ? (size.width - drawerActualW - 10.0) : 10.0;
+            self.drawerView.frame = CGRectMake(drawerX, drawerY, drawerActualW, drawerH);
+        } else {
+            CGFloat drawerHiddenX = _isBeadPinnedRight ? (size.width + 24.0) : (-drawerActualW - 24.0);
+            self.drawerView.frame = CGRectMake(drawerHiddenX, drawerY, drawerActualW, drawerH);
+        }
     }
 }
 
@@ -3145,8 +3402,8 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     UIEdgeInsets insets = self.view.safeAreaInsets;
     CGFloat safeTop = insets.top > 0 ? insets.top : 44.0;
     CGFloat safeBottom = insets.bottom > 0 ? insets.bottom : 34.0;
-    CGFloat beadW = 28.0;
-    CGFloat beadH = 104.0;
+    CGFloat beadW = 30.0;
+    CGFloat beadH = 96.0;
     CGFloat edgeInset = 0.0;
     CGFloat usableHeight = MAX(size.height - safeTop - safeBottom - beadH, 100.0);
 
@@ -3198,58 +3455,86 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     CGFloat drawerActualW = MIN(isListMode ? 260.0 : 296.0, size.width - 28.0);
 
     CGFloat openX = _isBeadPinnedRight ? (size.width - drawerActualW - 10.0) : 10.0;
-    CGFloat slideDeltaX = _isBeadPinnedRight ? 34.0 : -34.0;
+    CGFloat beadCenterY = self.beadView.center.y;
+    CGFloat drawerCenterY = drawerY + drawerH * 0.5;
+    CGFloat morphDY = beadCenterY - drawerCenterY;
+    CGFloat morphDX = _isBeadPinnedRight ? (drawerActualW * 0.50 + 10.0) : -(drawerActualW * 0.50 + 10.0);
+    CGAffineTransform collapsedTransform = CGAffineTransformConcat(
+        CGAffineTransformMakeScale(0.14, 0.20),
+        CGAffineTransformMakeTranslation(morphDX, morphDY)
+    );
 
+    __weak typeof(self) weakSelf = self;
     if (open) {
         self.drawerView.transform = CGAffineTransformIdentity;
         self.drawerView.frame = CGRectMake(openX, drawerY, drawerActualW, drawerH);
         [self.drawerView layoutIfNeeded];
         self.drawerView.alpha = 0.0;
-        self.drawerView.transform = CGAffineTransformConcat(
-            CGAffineTransformMakeScale(0.84, 0.88),
-            CGAffineTransformMakeTranslation(slideDeltaX, 0)
-        );
+        self.drawerView.transform = collapsedTransform;
         [self.drawerView playEntranceWaveFromRight:_isBeadPinnedRight];
-    }
 
-    NSTimeInterval duration = animated ? (open ? 0.38 : 0.22) : 0.0;
-    CGFloat damping = open ? 0.76 : 0.92;
-    CGFloat velocity = open ? 0.70 : 0.30;
-    __weak typeof(self) weakSelf = self;
-    [UIView animateWithDuration:duration
-                          delay:0
-         usingSpringWithDamping:damping
-          initialSpringVelocity:velocity
-                        options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{
-        weakSelf.dimmingMaskView.alpha = open ? 1.0 : 0.0;
-        if (open) {
-            weakSelf.drawerView.alpha = 1.0;
+        NSTimeInterval dur = animated ? 0.50 : 0.0;
+        [UIView animateWithDuration:dur
+                              delay:0
+             usingSpringWithDamping:0.68
+              initialSpringVelocity:0.92
+                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{
+            weakSelf.dimmingMaskView.alpha = 1.0;
             weakSelf.drawerView.transform = CGAffineTransformIdentity;
             weakSelf.beadView.alpha = 0.0;
-            weakSelf.beadView.transform = CGAffineTransformMakeScale(0.45, 0.45);
-        } else {
+            weakSelf.beadView.transform = CGAffineTransformMakeScale(1.55, 1.30);
+        } completion:nil];
+
+        [UIView animateWithDuration:(animated ? 0.18 : 0.0)
+                              delay:0
+                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseOut
+                         animations:^{
+            weakSelf.drawerView.alpha = 1.0;
+        } completion:nil];
+    } else {
+        // 折叠收起：无回弹平滑加速吸入边缘，前半程保持可见以便看清缩放吸入轨迹，后半程干脆隐去
+        NSTimeInterval collapseDur = animated ? 0.28 : 0.0;
+        [UIView animateWithDuration:collapseDur
+                              delay:0
+                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
+                         animations:^{
+            weakSelf.dimmingMaskView.alpha = 0.0;
+            weakSelf.drawerView.transform = collapsedTransform;
+        } completion:^(BOOL finished) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf && !strongSelf.isDrawerOpen) {
+                strongSelf.drawerView.alpha = 0.0;
+                strongSelf.drawerView.transform = CGAffineTransformIdentity;
+                strongSelf.drawerView.frame = CGRectMake(
+                    strongSelf->_isBeadPinnedRight ? (size.width + 24.0) : (-drawerActualW - 24.0),
+                    drawerY,
+                    drawerActualW,
+                    drawerH
+                );
+                [strongSelf resetInactivityTimer];
+            }
+        }];
+
+        [UIView animateWithDuration:(animated ? 0.16 : 0.0)
+                              delay:(animated ? 0.11 : 0.0)
+                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseIn
+                         animations:^{
             weakSelf.drawerView.alpha = 0.0;
-            weakSelf.drawerView.transform = CGAffineTransformConcat(
-                CGAffineTransformMakeScale(0.88, 0.90),
-                CGAffineTransformMakeTranslation(slideDeltaX * 0.7, 0)
-            );
+        } completion:nil];
+
+        // 抽屉即将没入边缘时，液态边框弹性接住并回弹归位
+        self.beadView.transform = CGAffineTransformMakeScale(1.38, 1.22);
+        [UIView animateWithDuration:(animated ? 0.34 : 0.0)
+                              delay:(animated ? 0.14 : 0.0)
+             usingSpringWithDamping:0.62
+              initialSpringVelocity:0.80
+                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{
             weakSelf.beadView.alpha = 1.0;
             weakSelf.beadView.transform = CGAffineTransformIdentity;
-        }
-    } completion:^(BOOL finished) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!open && strongSelf && !strongSelf.isDrawerOpen) {
-            strongSelf.drawerView.transform = CGAffineTransformIdentity;
-            strongSelf.drawerView.frame = CGRectMake(
-                strongSelf->_isBeadPinnedRight ? (size.width + 24.0) : (-drawerActualW - 24.0),
-                drawerY,
-                drawerActualW,
-                drawerH
-            );
-            [strongSelf resetInactivityTimer];
-        }
-    }];
+        } completion:nil];
+    }
 }
 
 - (void)refreshAppList {
