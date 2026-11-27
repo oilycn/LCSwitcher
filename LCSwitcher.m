@@ -68,13 +68,24 @@ static Class LCFindHostClass(NSString *baseName) {
     return c;
 }
 
+static id _Nullable LCGnoixBridge(void) {
+    Class bridgeCls = NSClassFromString(@"GnoixMultitaskBridge");
+    if (!bridgeCls) bridgeCls = NSClassFromString(@"GnoixHostUI.GnoixMultitaskBridge");
+    if (!bridgeCls) bridgeCls = NSClassFromString(@"Gnoix.GnoixMultitaskBridge");
+    if (bridgeCls && [bridgeCls respondsToSelector:@selector(shared)]) {
+        return [bridgeCls valueForKey:@"shared"];
+    }
+    return nil;
+}
+
 static BOOL LCIsLiveContainerHostProcess(void) {
     if (LCIsMultitaskExtensionProcess()) return NO;
     NSString *bundlePath = [NSBundle mainBundle].bundlePath ?: @"";
     if ([bundlePath containsString:@"/Documents/Applications/"]) {
         return NO;
     }
-    if (NSClassFromString(@"DecoratedAppSceneViewController") != nil ||
+    if (LCGnoixBridge() != nil ||
+        NSClassFromString(@"DecoratedAppSceneViewController") != nil ||
         NSClassFromString(@"PiPManager") != nil ||
         NSClassFromString(@"LCMultitaskSceneViewController") != nil) {
         return YES;
@@ -124,18 +135,57 @@ static NSDictionary *LCLoadSharedConfig(void) {
     return @{};
 }
 
-static void LCSaveSharedConfig(NSString *sidebarStyle, NSString *beadStyle, double collapsedOpacity, BOOL defaultFollowRotate) {
+static void LCSaveSharedConfigDict(NSDictionary *updates) {
     NSString *path = LCSharedConfigPath();
     if (!path.length) return;
+    NSMutableDictionary *merged = [LCLoadSharedConfig() mutableCopy] ?: [NSMutableDictionary dictionary];
+    [merged addEntriesFromDictionary:updates];
+    [merged writeToFile:path atomically:YES];
+    [[NSNotificationCenter defaultCenter] postNotificationName:LCSwitcherConfigDidChangeNotification object:nil];
+}
+
+static void LCSaveSharedConfig(NSString *sidebarStyle, NSString *beadStyle, double collapsedOpacity, BOOL defaultFollowRotate) {
     double clamped = fmin(fmax(collapsedOpacity, 0.4), 1.0);
-    NSDictionary *dict = @{
+    LCSaveSharedConfigDict(@{
         @"sidebarStyle": sidebarStyle ?: @"floatingBead",
         @"beadStyle": beadStyle ?: @"minimalLine",
         @"collapsedOpacity": @(clamped),
         @"defaultFollowSystemOrientation": @(defaultFollowRotate)
-    };
-    [dict writeToFile:path atomically:YES];
-    [[NSNotificationCenter defaultCenter] postNotificationName:LCSwitcherConfigDidChangeNotification object:nil];
+    });
+}
+
+static NSUInteger LCSharedGridColumns(void) {
+    NSNumber *n = LCLoadSharedConfig()[@"gridColumns"];
+    if ([n isKindOfClass:[NSNumber class]]) {
+        NSUInteger v = n.unsignedIntegerValue;
+        if (v == 1 || v == 3 || v == 4 || v == 5) return v;
+    }
+    // 默认采用精致单列玻璃卡片列表（告别拥挤的 4 列小图标），支持在设置中自由切换 列表 / 3列 / 4列 / 5列
+    return 1;
+}
+
+static BOOL LCSharedShowAppNames(void) {
+    NSNumber *n = LCLoadSharedConfig()[@"showAppNames"];
+    if ([n isKindOfClass:[NSNumber class]]) {
+        return n.boolValue;
+    }
+    return YES;
+}
+
+static NSArray<NSString *> *LCSharedPinnedFolders(void) {
+    NSArray *arr = LCLoadSharedConfig()[@"pinnedFolders"];
+    return [arr isKindOfClass:[NSArray class]] ? arr : @[];
+}
+
+static void LCTogglePinnedFolder(NSString *folderName) {
+    if (!folderName.length) return;
+    NSMutableArray<NSString *> *pinned = [LCSharedPinnedFolders() mutableCopy];
+    if ([pinned containsObject:folderName]) {
+        [pinned removeObject:folderName];
+    } else {
+        [pinned insertObject:folderName atIndex:0];
+    }
+    LCSaveSharedConfigDict(@{@"pinnedFolders": pinned});
 }
 
 static NSString *LCSharedSidebarStyle(void) {
@@ -650,9 +700,12 @@ static void LCApplyScreenScaleNow(void) {
         grad.cornerRadius = 5.0;
         [_grabberBarView.layer insertSublayer:grad atIndex:0];
     } else {
-        // minimalLine（默认）
-        _grabberBarView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.84];
-        _grabberBarView.layer.cornerRadius = 2.25;
+        // minimalLine（默认：灵动液态半胶囊耳翼）
+        _grabberBarView.backgroundColor = [UIColor colorWithRed:0.10 green:0.12 blue:0.16 alpha:0.62];
+        _grabberBarView.layer.shadowColor = [UIColor blackColor].CGColor;
+        _grabberBarView.layer.shadowOpacity = 0.28;
+        _grabberBarView.layer.shadowRadius = 6.0;
+        _grabberBarView.layer.shadowOffset = CGSizeZero;
     }
     [self setNeedsLayout];
 }
@@ -661,13 +714,36 @@ static void LCApplyScreenScaleNow(void) {
     [super layoutSubviews];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    CGFloat grabberW = 4.5;
-    CGFloat grabberH = 52.0;
-    CGFloat grabberX = self.isPinnedRight ? (self.bounds.size.width - grabberW - 2.5) : 2.5;
-    _grabberBarView.frame = CGRectMake(grabberX, (self.bounds.size.height - grabberH) * 0.5, grabberW, grabberH);
+    // 纤细悬浮胶囊微珠：不贴死边缘，全圆角纤细形态，居中柔光核心
+    CGFloat w = self.bounds.size.width;
+    CGFloat h = self.bounds.size.height;
+    CGFloat pillW = MIN(MAX(w, 6.0), 8.0);
+    CGFloat pillH = MIN(h, 60.0);
+    CGFloat pillX = (w - pillW) * 0.5;
+    CGFloat pillY = (h - pillH) * 0.5;
+    _grabberBarView.frame = CGRectMake(pillX, pillY, pillW, pillH);
+    _grabberBarView.layer.cornerRadius = pillW * 0.5;
+    _grabberBarView.layer.cornerCurve = kCACornerCurveContinuous;
+    _grabberBarView.layer.maskedCorners = (kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner);
+
+    // 居中纤细发光内芯
+    UIView *innerGlow = [_grabberBarView viewWithTag:9091];
+    if (!innerGlow) {
+        innerGlow = [[UIView alloc] init];
+        innerGlow.tag = 9091;
+        innerGlow.userInteractionEnabled = NO;
+        innerGlow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.90];
+        innerGlow.layer.cornerRadius = 1.25;
+        [_grabberBarView addSubview:innerGlow];
+    }
+    CGFloat glowW = 2.5;
+    CGFloat glowH = 30.0;
+    innerGlow.frame = CGRectMake((pillW - glowW) * 0.5, (pillH - glowH) * 0.5, glowW, glowH);
+
     for (CALayer *sub in _grabberBarView.layer.sublayers) {
         if ([sub.name isEqualToString:@"lcBeadGrad"]) {
             sub.frame = _grabberBarView.bounds;
+            sub.cornerRadius = _grabberBarView.layer.cornerRadius;
         }
     }
     [CATransaction commit];
@@ -932,6 +1008,10 @@ static void LCApplyScreenScaleNow(void) {
 
 - (BOOL)isPiPActive {
     if (gIsMultitaskHostMode) {
+        id gnoix = LCGnoixBridge();
+        if (gnoix) {
+            @try { return [[gnoix valueForKey:@"isFocusedInPiP"] boolValue]; } @catch (__unused NSException *e) {}
+        }
         Class pipCls = NSClassFromString(@"PiPManager");
         if (pipCls && [pipCls respondsToSelector:@selector(shared)]) {
             id pipMgr = [pipCls valueForKey:@"shared"];
@@ -965,6 +1045,19 @@ static void LCApplyScreenScaleNow(void) {
 
 - (void)togglePiPWithCompletion:(nullable void (^)(BOOL active, NSString * _Nullable errorMessage))completion {
     if (gIsMultitaskHostMode) {
+        id gnoix = LCGnoixBridge();
+        if (gnoix) {
+            SEL toggleSel = NSSelectorFromString(@"toggleFocusedPiP");
+            if ([gnoix respondsToSelector:toggleSel]) {
+                ((void (*)(id, SEL))objc_msgSend)(gnoix, toggleSel);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    BOOL activeNow = NO;
+                    @try { activeNow = [[gnoix valueForKey:@"isFocusedInPiP"] boolValue]; } @catch (__unused NSException *e) {}
+                    if (completion) completion(activeNow, nil);
+                });
+                return;
+            }
+        }
         Class pipCls = NSClassFromString(@"PiPManager");
         if (pipCls && [pipCls respondsToSelector:@selector(shared)]) {
             id pipMgr = [pipCls valueForKey:@"shared"];
@@ -1171,6 +1264,7 @@ static void LCApplyScreenScaleNow(void) {
 @property (nonatomic, copy, nullable) void (^onUserInteraction)(void);
 
 - (void)reloadWithApps:(NSArray<LCSwitcherAppInfo *> *)apps runningFolder:(NSString *)runningFolder foregroundUUID:(nullable NSString *)foregroundUUID runningUUIDs:(nullable NSSet<NSString *> *)runningUUIDs;
+- (void)playEntranceWaveFromRight:(BOOL)fromRight;
 - (void)setAutoRotateEnabled:(BOOL)enabled;
 - (void)setAutoRotateRowHidden:(BOOL)hidden;
 - (void)setScreenScale:(CGFloat)scale;
@@ -1181,14 +1275,20 @@ static void LCApplyScreenScaleNow(void) {
 
 @implementation LCSwitcherDrawerView {
     UIVisualEffectView *_blurView;
+    CAGradientLayer *_glassSheenLayer;
     UIView *_headerView;
+    UIView *_statusPill;
+    UIView *_statusDot;
     UILabel *_titleLabel;
     UILabel *_countBadge;
+    UIButton *_gridToggleButton;
     UIButton *_closeButton;
+    UIView *_gridTrayView;
     UIView *_controlsPanel;
     UIStackView *_controlsStack;
     UIView *_scalePopoverBar;
     BOOL _isScalePopoverOpen;
+    UIView *_bottomDockContainer;
     UIStackView *_bottomButtonsStack;
     UIButton *_homeActionButton;
     UIButton *_scaleActionButton;
@@ -1215,38 +1315,59 @@ static void LCApplyScreenScaleNow(void) {
     return self;
 }
 
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _glassSheenLayer.frame = self.bounds;
+    [CATransaction commit];
+}
+
 - (void)setupUI {
     self.clipsToBounds = YES;
-    self.backgroundColor = [UIColor clearColor];
+    self.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.13 alpha:0.32];
     self.autoresizingMask = UIViewAutoresizingNone;
 
-    UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
+    UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark];
     _blurView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
     _blurView.frame = self.bounds;
     _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self addSubview:_blurView];
 
-    self.layer.cornerRadius = 20.0;
-    self.layer.cornerCurve = kCACornerCurveContinuous;
-    self.layer.borderWidth = 0.6;
-    self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.25].CGColor;
-    self.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.layer.shadowOpacity = 0.45;
-    self.layer.shadowRadius = 18.0;
-    self.layer.shadowOffset = CGSizeMake(0, 4);
+    // Liquid Glass 顶部高光漫反射层
+    _glassSheenLayer = [CAGradientLayer layer];
+    _glassSheenLayer.colors = @[
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.16].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.04].CGColor,
+        (__bridge id)[UIColor colorWithWhite:0.0 alpha:0.06].CGColor
+    ];
+    _glassSheenLayer.locations = @[@0.0, @0.38, @1.0];
+    _glassSheenLayer.startPoint = CGPointMake(0.1, 0.0);
+    _glassSheenLayer.endPoint = CGPointMake(0.9, 1.0);
+    [self.layer addSublayer:_glassSheenLayer];
 
+    self.layer.cornerRadius = 28.0;
+    self.layer.cornerCurve = kCACornerCurveContinuous;
+    self.layer.borderWidth = 0.35;
+    self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.14].CGColor;
+    self.layer.shadowColor = [UIColor blackColor].CGColor;
+    self.layer.shadowOpacity = 0.42;
+    self.layer.shadowRadius = 26.0;
+    self.layer.shadowOffset = CGSizeMake(0, 10);
+
+    // 1. 极简无顶栏、无中间嵌套层设计：应用卡片直接铺陈在液态玻璃面板内，干脆通透
     _scrollView = [[UIScrollView alloc] init];
     _scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     _scrollView.showsVerticalScrollIndicator = NO;
     _scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     _scrollView.alwaysBounceVertical = YES;
-    _scrollView.contentInset = UIEdgeInsetsMake(4.0, 0, 8.0, 0);
+    _scrollView.contentInset = UIEdgeInsetsMake(4.0, 0, 6.0, 0);
     [self addSubview:_scrollView];
 
     _stackView = [[UIStackView alloc] init];
     _stackView.translatesAutoresizingMaskIntoConstraints = NO;
     _stackView.axis = UILayoutConstraintAxisVertical;
-    _stackView.spacing = 12.0;
+    _stackView.spacing = 10.0;
     _stackView.alignment = UIStackViewAlignmentFill;
     _stackView.distribution = UIStackViewDistributionFill;
     [_scrollView addSubview:_stackView];
@@ -1255,7 +1376,7 @@ static void LCApplyScreenScaleNow(void) {
     [self addSubview:_controlsPanel];
 
     [NSLayoutConstraint activateConstraints:@[
-        [_scrollView.topAnchor constraintEqualToAnchor:self.topAnchor constant:14.0],
+        [_scrollView.topAnchor constraintEqualToAnchor:self.topAnchor constant:12.0],
         [_scrollView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12.0],
         [_scrollView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12.0],
         [_scrollView.bottomAnchor constraintEqualToAnchor:_controlsPanel.topAnchor constant:-10.0],
@@ -1289,14 +1410,16 @@ static void LCApplyScreenScaleNow(void) {
                                           action:(SEL)action {
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.translatesAutoresizingMaskIntoConstraints = NO;
-    btn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
-    btn.layer.cornerRadius = 12.0;
+    btn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.09];
+    btn.layer.cornerRadius = 14.0;
     btn.layer.cornerCurve = kCACornerCurveContinuous;
-    btn.layer.borderWidth = 0.5;
-    btn.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
+    btn.layer.borderWidth = 0.0;
+    btn.accessibilityLabel = title;
+    [btn addTarget:self action:@selector(handleTileTouchDown:) forControlEvents:UIControlEventTouchDown];
+    [btn addTarget:self action:@selector(handleTileTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
     [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
 
-    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14.0 weight:UIImageSymbolWeightSemibold];
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:16.5 weight:UIImageSymbolWeightSemibold];
     UIImageView *iv = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:symbolName withConfiguration:cfg]];
     iv.translatesAutoresizingMaskIntoConstraints = NO;
     iv.userInteractionEnabled = NO;
@@ -1304,25 +1427,14 @@ static void LCApplyScreenScaleNow(void) {
     iv.contentMode = UIViewContentModeScaleAspectFit;
     [btn addSubview:iv];
 
-    UILabel *lbl = [[UILabel alloc] init];
-    lbl.translatesAutoresizingMaskIntoConstraints = NO;
-    lbl.userInteractionEnabled = NO;
-    lbl.text = title;
-    lbl.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightSemibold];
-    lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.88];
-    lbl.textAlignment = NSTextAlignmentCenter;
-    [btn addSubview:lbl];
-    if (outTitleLabel) *outTitleLabel = lbl;
+    if (outTitleLabel) *outTitleLabel = nil;
 
     [NSLayoutConstraint activateConstraints:@[
-        [btn.heightAnchor constraintEqualToConstant:46.0],
-        [iv.topAnchor constraintEqualToAnchor:btn.topAnchor constant:7.0],
+        [btn.heightAnchor constraintEqualToConstant:40.0],
         [iv.centerXAnchor constraintEqualToAnchor:btn.centerXAnchor],
-        [iv.widthAnchor constraintEqualToConstant:18.0],
-        [iv.heightAnchor constraintEqualToConstant:18.0],
-        [lbl.topAnchor constraintEqualToAnchor:iv.bottomAnchor constant:3.0],
-        [lbl.leadingAnchor constraintEqualToAnchor:btn.leadingAnchor constant:2.0],
-        [lbl.trailingAnchor constraintEqualToAnchor:btn.trailingAnchor constant:-2.0]
+        [iv.centerYAnchor constraintEqualToAnchor:btn.centerYAnchor],
+        [iv.widthAnchor constraintEqualToConstant:20.0],
+        [iv.heightAnchor constraintEqualToConstant:20.0]
     ]];
     return btn;
 }
@@ -1352,11 +1464,10 @@ static void LCApplyScreenScaleNow(void) {
     // 1. 可展开缩放滑块条（默认隐藏，点击底部“缩放”按钮后展开）
     _scalePopoverBar = [[UIView alloc] init];
     _scalePopoverBar.translatesAutoresizingMaskIntoConstraints = NO;
-    _scalePopoverBar.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.09];
-    _scalePopoverBar.layer.cornerRadius = 13.0;
+    _scalePopoverBar.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
+    _scalePopoverBar.layer.cornerRadius = 14.0;
     _scalePopoverBar.layer.cornerCurve = kCACornerCurveContinuous;
-    _scalePopoverBar.layer.borderWidth = 0.5;
-    _scalePopoverBar.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
+    _scalePopoverBar.layer.borderWidth = 0.0;
     _scalePopoverBar.hidden = YES;
     _scalePopoverBar.alpha = 0.0;
     [_controlsStack addArrangedSubview:_scalePopoverBar];
@@ -1391,17 +1502,44 @@ static void LCApplyScreenScaleNow(void) {
     [_scaleValueBadge addTarget:self action:@selector(handleResetScaleTapped) forControlEvents:UIControlEventTouchUpInside];
     [_scalePopoverBar addSubview:_scaleValueBadge];
 
+    // 快捷缩放预设胶囊（75% · 85% · 100% · 125%）
+    UIStackView *presetStack = [[UIStackView alloc] init];
+    presetStack.translatesAutoresizingMaskIntoConstraints = NO;
+    presetStack.axis = UILayoutConstraintAxisHorizontal;
+    presetStack.spacing = 6.0;
+    presetStack.distribution = UIStackViewDistributionFillEqually;
+    [_scalePopoverBar addSubview:presetStack];
+
+    NSArray<NSNumber *> *presets = @[@(0.75), @(0.85), @(1.00), @(1.25)];
+    for (NSNumber *p in presets) {
+        UIButton *pBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        pBtn.tag = (NSInteger)llround(p.doubleValue * 100.0);
+        [pBtn setTitle:[NSString stringWithFormat:@"%ld%%", (long)pBtn.tag] forState:UIControlStateNormal];
+        [pBtn setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.90] forState:UIControlStateNormal];
+        pBtn.titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:10.5 weight:UIFontWeightSemibold];
+        pBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+        pBtn.layer.cornerRadius = 7.0;
+        pBtn.layer.cornerCurve = kCACornerCurveContinuous;
+        [pBtn addTarget:self action:@selector(handleScalePresetTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [presetStack addArrangedSubview:pBtn];
+    }
+
     [NSLayoutConstraint activateConstraints:@[
-        [_scalePopoverBar.heightAnchor constraintEqualToConstant:40.0],
+        [_scalePopoverBar.heightAnchor constraintEqualToConstant:70.0],
         [minLbl.leadingAnchor constraintEqualToAnchor:_scalePopoverBar.leadingAnchor constant:10.0],
-        [minLbl.centerYAnchor constraintEqualToAnchor:_scalePopoverBar.centerYAnchor],
+        [minLbl.topAnchor constraintEqualToAnchor:_scalePopoverBar.topAnchor constant:12.0],
         [_scaleValueBadge.trailingAnchor constraintEqualToAnchor:_scalePopoverBar.trailingAnchor constant:-8.0],
-        [_scaleValueBadge.centerYAnchor constraintEqualToAnchor:_scalePopoverBar.centerYAnchor],
+        [_scaleValueBadge.centerYAnchor constraintEqualToAnchor:minLbl.centerYAnchor],
         [_scaleValueBadge.widthAnchor constraintEqualToConstant:44.0],
         [_scaleValueBadge.heightAnchor constraintEqualToConstant:22.0],
         [_scaleSlider.leadingAnchor constraintEqualToAnchor:minLbl.trailingAnchor constant:6.0],
         [_scaleSlider.trailingAnchor constraintEqualToAnchor:_scaleValueBadge.leadingAnchor constant:-8.0],
-        [_scaleSlider.centerYAnchor constraintEqualToAnchor:_scalePopoverBar.centerYAnchor]
+        [_scaleSlider.centerYAnchor constraintEqualToAnchor:minLbl.centerYAnchor],
+
+        [presetStack.leadingAnchor constraintEqualToAnchor:_scalePopoverBar.leadingAnchor constant:8.0],
+        [presetStack.trailingAnchor constraintEqualToAnchor:_scalePopoverBar.trailingAnchor constant:-8.0],
+        [presetStack.bottomAnchor constraintEqualToAnchor:_scalePopoverBar.bottomAnchor constant:-7.0],
+        [presetStack.heightAnchor constraintEqualToConstant:24.0]
     ]];
 
     // 2. 底部功能按钮栏（主页 · 缩放 · 画中画 · [单任务旋转]）
@@ -1501,6 +1639,7 @@ static void LCApplyScreenScaleNow(void) {
 - (void)setAutoRotateRowHidden:(BOOL)hidden {
     _rotateActionButton.hidden = hidden;
     _fullscreenActionButton.hidden = !hidden;
+    _pipActionButton.hidden = !hidden;
 }
 
 - (void)handleHomeLongPress:(UILongPressGestureRecognizer *)gesture {
@@ -1537,6 +1676,17 @@ static void LCApplyScreenScaleNow(void) {
     [self updateScaleBadge:stepped];
     if (self.onChangeScreenScale) {
         self.onChangeScreenScale(stepped);
+    }
+}
+
+- (void)handleScalePresetTapped:(UIButton *)sender {
+    if (self.onUserInteraction) self.onUserInteraction();
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    CGFloat val = (CGFloat)sender.tag / 100.0;
+    _scaleSlider.value = (float)val;
+    [self updateScaleBadge:val];
+    if (self.onChangeScreenScale) {
+        self.onChangeScreenScale(val);
     }
 }
 
@@ -1598,6 +1748,13 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
 }
 
 - (void)reloadWithApps:(NSArray<LCSwitcherAppInfo *> *)apps runningFolder:(NSString *)runningFolder foregroundUUID:(nullable NSString *)foregroundUUID runningUUIDs:(nullable NSSet<NSString *> *)runningUUIDs {
+    if (gIsMultitaskHostMode) {
+        NSUInteger activeCount = runningUUIDs.count;
+        _titleLabel.text = activeCount > 0 ? [NSString stringWithFormat:@"多任务 · 运行中 %lu", (unsigned long)activeCount] : @"多任务切换";
+    } else {
+        NSString *display = runningFolder.length ? [runningFolder stringByDeletingPathExtension] : @"单开切换";
+        _titleLabel.text = display;
+    }
     _countBadge.text = [NSString stringWithFormat:@" %lu ", (unsigned long)apps.count];
 
     for (UIView *sub in [_stackView.arrangedSubviews copy]) {
@@ -1605,107 +1762,370 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
         [sub removeFromSuperview];
     }
 
-    const NSUInteger columns = 4;
-    NSUInteger count = apps.count;
-    for (NSUInteger i = 0; i < count; i += columns) {
-        UIStackView *rowStack = [[UIStackView alloc] init];
-        rowStack.axis = UILayoutConstraintAxisHorizontal;
-        rowStack.spacing = 8.0;
-        rowStack.alignment = UIStackViewAlignmentTop;
-        rowStack.distribution = UIStackViewDistributionFillEqually;
+    // 排序优先级（参考 LCGridLayout）：前台运行 → 后台运行 → 用户置顶收藏 → 其余应用
+    NSArray<NSString *> *pinnedFolders = LCSharedPinnedFolders();
+    NSArray<LCSwitcherAppInfo *> *orderedApps = apps;
+    if (apps.count > 1) {
+        orderedApps = [apps sortedArrayUsingComparator:^NSComparisonResult(LCSwitcherAppInfo *a, LCSwitcherAppInfo *b) {
+            int rankA = 3;
+            int rankB = 3;
+            if (gIsMultitaskHostMode) {
+                if (foregroundUUID.length && [a.dataUUID isEqualToString:foregroundUUID]) rankA = 0;
+                else if ([runningUUIDs containsObject:a.dataUUID]) rankA = 1;
+                else if ([pinnedFolders containsObject:a.folderName]) rankA = 2;
 
-        for (NSUInteger c = 0; c < columns; c++) {
-            NSUInteger idx = i + c;
-            if (idx < count) {
-                LCSwitcherAppInfo *app = apps[idx];
-                BOOL isForeground = NO;
-                BOOL isRunning = NO;
-                if (gIsMultitaskHostMode) {
-                    isForeground = (foregroundUUID.length > 0 && app.dataUUID.length > 0 && [app.dataUUID isEqualToString:foregroundUUID]);
-                    isRunning = isForeground || (app.dataUUID.length > 0 && [runningUUIDs containsObject:app.dataUUID]);
-                } else {
-                    isForeground = (runningFolder.length > 0 && [app.folderName isEqualToString:runningFolder]);
-                    isRunning = isForeground;
-                }
-                UIView *tile = [self createAppTileWithApp:app isForeground:isForeground isRunning:isRunning];
-                [rowStack addArrangedSubview:tile];
+                if (foregroundUUID.length && [b.dataUUID isEqualToString:foregroundUUID]) rankB = 0;
+                else if ([runningUUIDs containsObject:b.dataUUID]) rankB = 1;
+                else if ([pinnedFolders containsObject:b.folderName]) rankB = 2;
             } else {
-                UIView *spacer = [[UIView alloc] init];
-                spacer.userInteractionEnabled = NO;
-                [rowStack addArrangedSubview:spacer];
+                if (runningFolder.length && [a.folderName isEqualToString:runningFolder]) rankA = 0;
+                else if ([pinnedFolders containsObject:a.folderName]) rankA = 2;
+
+                if (runningFolder.length && [b.folderName isEqualToString:runningFolder]) rankB = 0;
+                else if ([pinnedFolders containsObject:b.folderName]) rankB = 2;
             }
+            if (rankA != rankB) return rankA < rankB ? NSOrderedAscending : NSOrderedDescending;
+            if (rankA == 2 && rankB == 2) {
+                NSUInteger idxA = [pinnedFolders indexOfObject:a.folderName];
+                NSUInteger idxB = [pinnedFolders indexOfObject:b.folderName];
+                if (idxA != idxB) return idxA < idxB ? NSOrderedAscending : NSOrderedDescending;
+            }
+            return NSOrderedSame;
+        }];
+    }
+
+    const NSUInteger columns = LCSharedGridColumns();
+    const BOOL showNames = LCSharedShowAppNames();
+    NSUInteger count = orderedApps.count;
+
+    if (columns == 1) {
+        // 精致单列液态玻璃卡片列表（VisionOS / iOS 26 悬浮侧边栏质感）
+        _stackView.spacing = 7.0;
+        for (NSUInteger i = 0; i < count; i++) {
+            LCSwitcherAppInfo *app = orderedApps[i];
+            BOOL isForeground = NO;
+            BOOL isRunning = NO;
+            if (gIsMultitaskHostMode) {
+                isForeground = (foregroundUUID.length > 0 && app.dataUUID.length > 0 && [app.dataUUID isEqualToString:foregroundUUID]);
+                isRunning = isForeground || (app.dataUUID.length > 0 && [runningUUIDs containsObject:app.dataUUID]);
+            } else {
+                isForeground = (runningFolder.length > 0 && [app.folderName isEqualToString:runningFolder]);
+                isRunning = isForeground;
+            }
+            BOOL isPinned = [pinnedFolders containsObject:app.folderName];
+            UIView *rowCard = [self createGlassListRowWithApp:app isForeground:isForeground isRunning:isRunning isPinned:isPinned];
+            [_stackView addArrangedSubview:rowCard];
         }
-        [_stackView addArrangedSubview:rowStack];
+    } else {
+        _stackView.spacing = 11.0;
+        for (NSUInteger i = 0; i < count; i += columns) {
+            UIStackView *rowStack = [[UIStackView alloc] init];
+            rowStack.axis = UILayoutConstraintAxisHorizontal;
+            rowStack.spacing = (columns == 5) ? 5.0 : 8.0;
+            rowStack.alignment = UIStackViewAlignmentTop;
+            rowStack.distribution = UIStackViewDistributionFillEqually;
+
+            for (NSUInteger c = 0; c < columns; c++) {
+                NSUInteger idx = i + c;
+                if (idx < count) {
+                    LCSwitcherAppInfo *app = orderedApps[idx];
+                    BOOL isForeground = NO;
+                    BOOL isRunning = NO;
+                    if (gIsMultitaskHostMode) {
+                        isForeground = (foregroundUUID.length > 0 && app.dataUUID.length > 0 && [app.dataUUID isEqualToString:foregroundUUID]);
+                        isRunning = isForeground || (app.dataUUID.length > 0 && [runningUUIDs containsObject:app.dataUUID]);
+                    } else {
+                        isForeground = (runningFolder.length > 0 && [app.folderName isEqualToString:runningFolder]);
+                        isRunning = isForeground;
+                    }
+                    BOOL isPinned = [pinnedFolders containsObject:app.folderName];
+                    UIView *tile = [self createAppTileWithApp:app isForeground:isForeground isRunning:isRunning isPinned:isPinned columns:columns showName:showNames];
+                    [rowStack addArrangedSubview:tile];
+                } else {
+                    UIView *spacer = [[UIView alloc] init];
+                    spacer.userInteractionEnabled = NO;
+                    [rowStack addArrangedSubview:spacer];
+                }
+            }
+            [_stackView addArrangedSubview:rowStack];
+        }
     }
 }
 
-- (UIView *)createAppTileWithApp:(LCSwitcherAppInfo *)app isForeground:(BOOL)isForeground isRunning:(BOOL)isRunning {
+- (void)playEntranceWaveFromRight:(BOOL)fromRight {
+    NSArray<UIView *> *rows = _stackView.arrangedSubviews;
+    CGFloat dx = fromRight ? 18.0 : -18.0;
+    for (NSUInteger i = 0; i < rows.count; i++) {
+        UIView *row = rows[i];
+        row.alpha = 0.0;
+        row.transform = CGAffineTransformConcat(
+            CGAffineTransformMakeScale(0.93, 0.93),
+            CGAffineTransformMakeTranslation(dx, 4.0)
+        );
+        NSTimeInterval delay = MIN(i * 0.022, 0.18);
+        [UIView animateWithDuration:0.34
+                              delay:delay
+             usingSpringWithDamping:0.78
+              initialSpringVelocity:0.65
+                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseOut
+                         animations:^{
+            row.alpha = 1.0;
+            row.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }
+}
+
+- (UIView *)createGlassListRowWithApp:(LCSwitcherAppInfo *)app isForeground:(BOOL)isForeground isRunning:(BOOL)isRunning isPinned:(BOOL)isPinned {
+    UIButton *card = [UIButton buttonWithType:UIButtonTypeCustom];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.layer.borderWidth = 0.0;
+    if (isForeground) {
+        card.backgroundColor = [UIColor colorWithRed:0.16 green:0.78 blue:0.42 alpha:0.18];
+    } else if (isRunning) {
+        card.backgroundColor = [UIColor colorWithRed:0.24 green:0.66 blue:1.0 alpha:0.13];
+    } else {
+        card.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.055];
+    }
+    card.layer.cornerRadius = 15.0;
+    card.layer.cornerCurve = kCACornerCurveContinuous;
+
+    UIImage *rawIcon = app.icon ?: [UIImage systemImageNamed:@"app.fill"];
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:rawIcon];
+    iconView.alpha = isRunning ? 1.0 : 0.90;
+    iconView.contentMode = UIViewContentModeScaleAspectFill;
+    iconView.layer.cornerRadius = 9.5;
+    iconView.layer.cornerCurve = kCACornerCurveContinuous;
+    iconView.clipsToBounds = YES;
+    iconView.layer.borderWidth = 0.0;
+    iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    iconView.userInteractionEnabled = NO;
+    [card addSubview:iconView];
+
+    UIStackView *textStack = [[UIStackView alloc] init];
+    textStack.axis = UILayoutConstraintAxisVertical;
+    textStack.spacing = 1.5;
+    textStack.translatesAutoresizingMaskIntoConstraints = NO;
+    textStack.userInteractionEnabled = NO;
+
+    UILabel *nameLabel = [[UILabel alloc] init];
+    nameLabel.text = app.name;
+    nameLabel.font = [UIFont systemFontOfSize:13.5 weight:(isForeground ? UIFontWeightBold : UIFontWeightSemibold)];
+    nameLabel.textColor = isRunning ? [UIColor whiteColor] : [UIColor colorWithWhite:1.0 alpha:0.86];
+    nameLabel.numberOfLines = 1;
+    nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    UILabel *subLabel = [[UILabel alloc] init];
+    if (isForeground) {
+        subLabel.text = @"前台运行中";
+        subLabel.textColor = [UIColor colorWithRed:0.35 green:0.95 blue:0.56 alpha:0.95];
+    } else if (isRunning) {
+        subLabel.text = @"后台运行中";
+        subLabel.textColor = [UIColor colorWithRed:0.46 green:0.84 blue:1.0 alpha:0.92];
+    } else if (isPinned) {
+        subLabel.text = @"已置顶 · 轻点启动";
+        subLabel.textColor = [UIColor colorWithRed:1.0 green:0.80 blue:0.36 alpha:0.88];
+    } else {
+        subLabel.text = @"轻点启动";
+        subLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
+    }
+    subLabel.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightMedium];
+    subLabel.numberOfLines = 1;
+
+    [textStack addArrangedSubview:nameLabel];
+    [textStack addArrangedSubview:subLabel];
+    [card addSubview:textStack];
+
+    UIView *trailingView = nil;
+    if (isForeground || isRunning) {
+        UIView *dot = [[UIView alloc] init];
+        dot.translatesAutoresizingMaskIntoConstraints = NO;
+        dot.userInteractionEnabled = NO;
+        UIColor *dotColor = isForeground
+            ? [UIColor colorWithRed:0.24 green:0.94 blue:0.48 alpha:1.0]
+            : [UIColor colorWithRed:0.36 green:0.80 blue:1.0 alpha:1.0];
+        dot.backgroundColor = dotColor;
+        dot.layer.cornerRadius = 4.5;
+        dot.layer.shadowColor = dotColor.CGColor;
+        dot.layer.shadowRadius = 5.0;
+        dot.layer.shadowOpacity = 0.9;
+        dot.layer.shadowOffset = CGSizeZero;
+        if (isForeground) {
+            // 前台活跃应用呼吸脉冲光效
+            CABasicAnimation *pulseScale = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+            pulseScale.fromValue = @0.92;
+            pulseScale.toValue = @1.32;
+            pulseScale.duration = 1.15;
+            pulseScale.autoreverses = YES;
+            pulseScale.repeatCount = HUGE_VALF;
+            pulseScale.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            [dot.layer addAnimation:pulseScale forKey:@"lcBreathScale"];
+
+            CABasicAnimation *pulseOpacity = [CABasicAnimation animationWithKeyPath:@"opacity"];
+            pulseOpacity.fromValue = @1.0;
+            pulseOpacity.toValue = @0.55;
+            pulseOpacity.duration = 1.15;
+            pulseOpacity.autoreverses = YES;
+            pulseOpacity.repeatCount = HUGE_VALF;
+            [dot.layer addAnimation:pulseOpacity forKey:@"lcBreathOpacity"];
+        }
+        [card addSubview:dot];
+        [NSLayoutConstraint activateConstraints:@[
+            [dot.widthAnchor constraintEqualToConstant:9.0],
+            [dot.heightAnchor constraintEqualToConstant:9.0]
+        ]];
+        trailingView = dot;
+    } else if (isPinned) {
+        UIImageSymbolConfiguration *pinCfg = [UIImageSymbolConfiguration configurationWithPointSize:11.0 weight:UIImageSymbolWeightSemibold];
+        UIImageView *pinIv = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"pin.fill" withConfiguration:pinCfg]];
+        pinIv.translatesAutoresizingMaskIntoConstraints = NO;
+        pinIv.userInteractionEnabled = NO;
+        pinIv.tintColor = [UIColor colorWithRed:1.0 green:0.80 blue:0.34 alpha:0.90];
+        [card addSubview:pinIv];
+        trailingView = pinIv;
+    } else {
+        UIImageSymbolConfiguration *chevCfg = [UIImageSymbolConfiguration configurationWithPointSize:11.0 weight:UIImageSymbolWeightSemibold];
+        UIImageView *chev = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right" withConfiguration:chevCfg]];
+        chev.translatesAutoresizingMaskIntoConstraints = NO;
+        chev.userInteractionEnabled = NO;
+        chev.tintColor = [UIColor colorWithWhite:1.0 alpha:0.30];
+        [card addSubview:chev];
+        trailingView = chev;
+    }
+
+    [NSLayoutConstraint activateConstraints:@[
+        [card.heightAnchor constraintEqualToConstant:52.0],
+        [iconView.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:9.0],
+        [iconView.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
+        [iconView.widthAnchor constraintEqualToConstant:35.0],
+        [iconView.heightAnchor constraintEqualToConstant:35.0],
+
+        [textStack.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:10.0],
+        [textStack.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
+        [textStack.trailingAnchor constraintLessThanOrEqualToAnchor:trailingView.leadingAnchor constant:-8.0],
+
+        [trailingView.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12.0],
+        [trailingView.centerYAnchor constraintEqualToAnchor:card.centerYAnchor]
+    ]];
+
+    objc_setAssociatedObject(card, "LCAppInfoObject", app, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [card addTarget:self action:@selector(handleTileTouchDown:) forControlEvents:UIControlEventTouchDown];
+    [card addTarget:self action:@selector(handleTileTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+    [card addTarget:self action:@selector(handleAppCardTapped:) forControlEvents:UIControlEventTouchUpInside];
+    UILongPressGestureRecognizer *cardLP = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppCardLongPressed:)];
+    cardLP.minimumPressDuration = 0.35;
+    [card addGestureRecognizer:cardLP];
+    return card;
+}
+
+- (UIView *)createAppTileWithApp:(LCSwitcherAppInfo *)app isForeground:(BOOL)isForeground isRunning:(BOOL)isRunning isPinned:(BOOL)isPinned columns:(NSUInteger)columns showName:(BOOL)showName {
     UIButton *tile = [UIButton buttonWithType:UIButtonTypeCustom];
     tile.translatesAutoresizingMaskIntoConstraints = NO;
     tile.backgroundColor = [UIColor clearColor];
 
+    CGFloat iconSide = (columns == 5) ? 38.0 : (columns == 3 ? 48.0 : 44.0);
     UIImage *rawIcon = app.icon ?: [UIImage systemImageNamed:@"app.fill"];
     UIImageView *iconView = [[UIImageView alloc] init];
-    // 前台与后台运行中均为彩色图标；仅未运行的应用显示灰度图标
-    iconView.image = isRunning ? rawIcon : (LCGrayscaleImage(rawIcon) ?: rawIcon);
-    iconView.alpha = isRunning ? 1.0 : 0.68;
+    // 全彩原生图标展示（告别灰白图标），通过右上角发光状态点区分前台/后台运行态
+    iconView.image = rawIcon;
+    iconView.alpha = isRunning ? 1.0 : 0.90;
     iconView.contentMode = UIViewContentModeScaleAspectFill;
-    iconView.layer.cornerRadius = 11.0;
+    iconView.layer.cornerRadius = (columns == 5) ? 9.5 : 12.0;
     iconView.layer.cornerCurve = kCACornerCurveContinuous;
     iconView.clipsToBounds = YES;
-    iconView.layer.borderWidth = isForeground ? 1.5 : 0.5;
-    iconView.layer.borderColor = isForeground ? [UIColor systemGreenColor].CGColor : [UIColor colorWithWhite:1.0 alpha:(isRunning ? 0.28 : 0.14)].CGColor;
+    iconView.layer.borderWidth = isForeground ? 1.4 : 0.0;
+    if (isForeground) {
+        iconView.layer.borderColor = [UIColor colorWithRed:0.20 green:0.90 blue:0.44 alpha:0.95].CGColor;
+    }
     iconView.translatesAutoresizingMaskIntoConstraints = NO;
     iconView.userInteractionEnabled = NO;
     [tile addSubview:iconView];
 
-    if (isForeground) {
-        UIView *greenDot = [[UIView alloc] init];
-        greenDot.translatesAutoresizingMaskIntoConstraints = NO;
-        greenDot.userInteractionEnabled = NO;
-        greenDot.backgroundColor = [UIColor colorWithRed:0.20 green:0.90 blue:0.42 alpha:1.0];
-        greenDot.layer.cornerRadius = 4.5;
-        greenDot.layer.borderWidth = 1.4;
-        greenDot.layer.borderColor = [UIColor colorWithWhite:0.08 alpha:0.9].CGColor;
-        [tile addSubview:greenDot];
+    if (isForeground || isRunning) {
+        UIView *statusDot = [[UIView alloc] init];
+        statusDot.translatesAutoresizingMaskIntoConstraints = NO;
+        statusDot.userInteractionEnabled = NO;
+        statusDot.backgroundColor = isForeground
+            ? [UIColor colorWithRed:0.20 green:0.90 blue:0.42 alpha:1.0]
+            : [UIColor colorWithRed:0.35 green:0.78 blue:1.0 alpha:1.0];
+        statusDot.layer.cornerRadius = 4.5;
+        statusDot.layer.borderWidth = 1.4;
+        statusDot.layer.borderColor = [UIColor colorWithWhite:0.08 alpha:0.9].CGColor;
+        [tile addSubview:statusDot];
 
         [NSLayoutConstraint activateConstraints:@[
-            [greenDot.topAnchor constraintEqualToAnchor:iconView.topAnchor constant:-2.0],
-            [greenDot.trailingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:2.0],
-            [greenDot.widthAnchor constraintEqualToConstant:9.0],
-            [greenDot.heightAnchor constraintEqualToConstant:9.0]
+            [statusDot.topAnchor constraintEqualToAnchor:iconView.topAnchor constant:-2.0],
+            [statusDot.trailingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:2.0],
+            [statusDot.widthAnchor constraintEqualToConstant:9.0],
+            [statusDot.heightAnchor constraintEqualToConstant:9.0]
+        ]];
+    } else if (isPinned) {
+        UIImageSymbolConfiguration *pinCfg = [UIImageSymbolConfiguration configurationWithPointSize:7.5 weight:UIImageSymbolWeightBold];
+        UIImageView *pinBadge = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"pin.fill" withConfiguration:pinCfg]];
+        pinBadge.translatesAutoresizingMaskIntoConstraints = NO;
+        pinBadge.userInteractionEnabled = NO;
+        pinBadge.tintColor = [UIColor colorWithRed:1.0 green:0.78 blue:0.28 alpha:0.95];
+        [tile addSubview:pinBadge];
+        [NSLayoutConstraint activateConstraints:@[
+            [pinBadge.topAnchor constraintEqualToAnchor:iconView.topAnchor constant:-2.0],
+            [pinBadge.trailingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:2.0],
+            [pinBadge.widthAnchor constraintEqualToConstant:11.0],
+            [pinBadge.heightAnchor constraintEqualToConstant:11.0]
         ]];
     }
 
-    UILabel *nameLabel = [[UILabel alloc] init];
-    nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    nameLabel.userInteractionEnabled = NO;
-    nameLabel.text = app.name;
-    nameLabel.font = [UIFont systemFontOfSize:10.5 weight:(isForeground ? UIFontWeightSemibold : UIFontWeightRegular)];
-    nameLabel.textColor = isRunning ? [UIColor colorWithWhite:1.0 alpha:(isForeground ? 1.0 : 0.88)] : [UIColor colorWithWhite:1.0 alpha:0.52];
-    nameLabel.textAlignment = NSTextAlignmentCenter;
-    nameLabel.numberOfLines = 1;
-    nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [tile addSubview:nameLabel];
+    if (showName) {
+        UILabel *nameLabel = [[UILabel alloc] init];
+        nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        nameLabel.userInteractionEnabled = NO;
+        nameLabel.text = app.name;
+        nameLabel.font = [UIFont systemFontOfSize:(columns == 5 ? 9.5 : 10.5) weight:(isForeground ? UIFontWeightSemibold : UIFontWeightRegular)];
+        nameLabel.textColor = isRunning ? [UIColor colorWithWhite:1.0 alpha:(isForeground ? 1.0 : 0.88)] : [UIColor colorWithWhite:1.0 alpha:0.52];
+        nameLabel.textAlignment = NSTextAlignmentCenter;
+        nameLabel.numberOfLines = 1;
+        nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [tile addSubview:nameLabel];
 
-    [NSLayoutConstraint activateConstraints:@[
-        [iconView.topAnchor constraintEqualToAnchor:tile.topAnchor constant:2.0],
-        [iconView.centerXAnchor constraintEqualToAnchor:tile.centerXAnchor],
-        [iconView.widthAnchor constraintEqualToConstant:44.0],
-        [iconView.heightAnchor constraintEqualToConstant:44.0],
+        [NSLayoutConstraint activateConstraints:@[
+            [iconView.topAnchor constraintEqualToAnchor:tile.topAnchor constant:2.0],
+            [iconView.centerXAnchor constraintEqualToAnchor:tile.centerXAnchor],
+            [iconView.widthAnchor constraintEqualToConstant:iconSide],
+            [iconView.heightAnchor constraintEqualToConstant:iconSide],
 
-        [nameLabel.topAnchor constraintEqualToAnchor:iconView.bottomAnchor constant:4.0],
-        [nameLabel.leadingAnchor constraintEqualToAnchor:tile.leadingAnchor constant:1.0],
-        [nameLabel.trailingAnchor constraintEqualToAnchor:tile.trailingAnchor constant:-1.0],
-        [nameLabel.bottomAnchor constraintEqualToAnchor:tile.bottomAnchor constant:-2.0]
-    ]];
+            [nameLabel.topAnchor constraintEqualToAnchor:iconView.bottomAnchor constant:4.0],
+            [nameLabel.leadingAnchor constraintEqualToAnchor:tile.leadingAnchor constant:1.0],
+            [nameLabel.trailingAnchor constraintEqualToAnchor:tile.trailingAnchor constant:-1.0],
+            [nameLabel.bottomAnchor constraintEqualToAnchor:tile.bottomAnchor constant:-2.0]
+        ]];
+    } else {
+        [NSLayoutConstraint activateConstraints:@[
+            [iconView.topAnchor constraintEqualToAnchor:tile.topAnchor constant:3.0],
+            [iconView.centerXAnchor constraintEqualToAnchor:tile.centerXAnchor],
+            [iconView.widthAnchor constraintEqualToConstant:iconSide],
+            [iconView.heightAnchor constraintEqualToConstant:iconSide],
+            [iconView.bottomAnchor constraintEqualToAnchor:tile.bottomAnchor constant:-3.0]
+        ]];
+    }
 
     objc_setAssociatedObject(tile, "LCAppInfoObject", app, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [tile addTarget:self action:@selector(handleTileTouchDown:) forControlEvents:UIControlEventTouchDown];
+    [tile addTarget:self action:@selector(handleTileTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
     [tile addTarget:self action:@selector(handleAppCardTapped:) forControlEvents:UIControlEventTouchUpInside];
     UILongPressGestureRecognizer *tileLP = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppCardLongPressed:)];
-    tileLP.minimumPressDuration = 0.5;
+    tileLP.minimumPressDuration = 0.35;
     [tile addGestureRecognizer:tileLP];
     return tile;
+}
+
+- (void)handleTileTouchDown:(UIButton *)sender {
+    [UIView animateWithDuration:0.10 animations:^{
+        sender.transform = CGAffineTransformMakeScale(0.91, 0.91);
+    }];
+}
+
+- (void)handleTileTouchUp:(UIButton *)sender {
+    [UIView animateWithDuration:0.22 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+        sender.transform = CGAffineTransformIdentity;
+    } completion:nil];
 }
 
 - (void)handleAppCardTapped:(UIButton *)sender {
@@ -1833,11 +2253,15 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
 @interface LCSwitcherSettingsViewController : UITableViewController
 @end
 
+static void LCReleaseModalHostWindowIfUnused(void);
+
 @implementation LCSwitcherSettingsViewController {
     NSString *_sidebarStyle;
     NSString *_beadStyle;
     CGFloat _collapsedOpacity;
     BOOL _defaultFollowRotate;
+    NSUInteger _gridColumns;
+    BOOL _showAppNames;
     UILabel *_opacityValueLabel;
 }
 
@@ -1847,7 +2271,7 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"微珠设置";
+    self.title = @"微珠与网格设置";
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
                                                                               style:UIBarButtonItemStyleDone
                                                                              target:self
@@ -1856,15 +2280,36 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
     _beadStyle = LCSharedBeadStyle();
     _collapsedOpacity = LCSharedCollapsedOpacity();
     _defaultFollowRotate = LCSharedDefaultFollowSystemOrientation();
+    _gridColumns = LCSharedGridColumns();
+    _showAppNames = LCSharedShowAppNames();
     self.tableView.allowsSelection = NO;
 }
 
 - (void)handleDone {
-    [self dismissViewControllerAnimated:YES completion:nil];
+    [self dismissViewControllerAnimated:YES completion:^{
+        LCReleaseModalHostWindowIfUnused();
+    }];
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    if (self.isBeingDismissed || self.navigationController.isBeingDismissed) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LCReleaseModalHostWindowIfUnused();
+        });
+    }
 }
 
 - (void)persistConfig {
-    LCSaveSharedConfig(_sidebarStyle, _beadStyle, (double)_collapsedOpacity, _defaultFollowRotate);
+    NSUInteger validCols = (_gridColumns == 1 || _gridColumns == 3 || _gridColumns == 4 || _gridColumns == 5) ? _gridColumns : 1;
+    LCSaveSharedConfigDict(@{
+        @"sidebarStyle": _sidebarStyle ?: @"floatingBead",
+        @"beadStyle": _beadStyle ?: @"minimalLine",
+        @"collapsedOpacity": @(fmin(fmax((double)_collapsedOpacity, 0.4), 1.0)),
+        @"defaultFollowSystemOrientation": @(_defaultFollowRotate),
+        @"gridColumns": @(validCols),
+        @"showAppNames": @(_showAppNames)
+    });
 }
 
 + (NSArray<NSDictionary<NSString *, NSString *> *> *)beadStyleOptions {
@@ -1885,23 +2330,31 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return 2;
+    return 3;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) {
         return [_sidebarStyle isEqualToString:@"floatingBead"] ? 3 : 1;
     }
+    if (section == 1) {
+        return 2;
+    }
     return 1;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return section == 0 ? @"手势与微珠" : @"单开模式";
+    if (section == 0) return @"手势与微珠";
+    if (section == 1) return @"抽屉网格布局";
+    return @"单开模式";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == 0) {
         return @"单任务与多任务实时共用；折叠微珠模式下按住微珠 0.5 秒可拖动位置。";
+    }
+    if (section == 1) {
+        return @"参考 LCGridLayout：支持 4/5 列切换与隐藏应用名；抽屉内长按应用图标可置顶收藏或关闭进程。";
     }
     return @"开启后单开应用默认随系统重力感应与竖排锁自由旋转（可在抽屉内按单应用随时切换）。";
 }
@@ -1983,6 +2436,20 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
                 [vStack.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16.0]
             ]];
         }
+    } else if (indexPath.section == 1) {
+        if (indexPath.row == 0) {
+            cell.textLabel.text = @"展示样式";
+            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"列表", @"3列", @"4列", @"5列"]];
+            seg.selectedSegmentIndex = (_gridColumns == 1) ? 0 : ((_gridColumns == 3) ? 1 : ((_gridColumns == 4) ? 2 : 3));
+            [seg addTarget:self action:@selector(handleGridColumnsChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = seg;
+        } else {
+            cell.textLabel.text = @"宫格显示应用名";
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = _showAppNames;
+            [sw addTarget:self action:@selector(handleShowNamesChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+        }
     } else {
         cell.textLabel.text = @"单开默认随系统旋转";
         UISwitch *sw = [[UISwitch alloc] init];
@@ -1992,6 +2459,21 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
     }
 
     return cell;
+}
+
+- (void)handleGridColumnsChanged:(UISegmentedControl *)seg {
+    switch (seg.selectedSegmentIndex) {
+        case 0: _gridColumns = 1; break;
+        case 1: _gridColumns = 3; break;
+        case 2: _gridColumns = 4; break;
+        default: _gridColumns = 5; break;
+    }
+    [self persistConfig];
+}
+
+- (void)handleShowNamesChanged:(UISwitch *)sw {
+    _showAppNames = sw.isOn;
+    [self persistConfig];
 }
 
 - (void)handleSidebarStyleChanged:(UISegmentedControl *)seg {
@@ -2014,7 +2496,52 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
 
 @end
 
+static UIWindow *gLCModalHostWindow = nil;
+
+static void LCReleaseModalHostWindowIfUnused(void) {
+    if (!gLCModalHostWindow) return;
+    UIViewController *root = gLCModalHostWindow.rootViewController;
+    if (!root.presentedViewController || root.presentedViewController.isBeingDismissed) {
+        gLCModalHostWindow.hidden = YES;
+        gLCModalHostWindow.rootViewController = nil;
+        gLCModalHostWindow = nil;
+    }
+}
+
+static UIViewController *LCEnsureTopLevelModalHostController(void) {
+    UIWindowScene *activeScene = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) {
+            if (s.activationState == UISceneActivationStateForegroundActive) {
+                activeScene = (UIWindowScene *)s;
+                break;
+            }
+            if (!activeScene) activeScene = (UIWindowScene *)s;
+        }
+    }
+    if (!activeScene) return nil;
+
+    if (!gLCModalHostWindow) {
+        UIWindow *win = [[UIWindow alloc] initWithWindowScene:activeScene];
+        win.windowLevel = UIWindowLevelAlert + 80.0;
+        win.backgroundColor = [UIColor clearColor];
+        UIViewController *root = [[UIViewController alloc] init];
+        root.view.backgroundColor = [UIColor clearColor];
+        win.rootViewController = root;
+        gLCModalHostWindow = win;
+    }
+    gLCModalHostWindow.hidden = NO;
+    [gLCModalHostWindow makeKeyAndVisible];
+    UIViewController *top = gLCModalHostWindow.rootViewController;
+    while (top.presentedViewController && !top.presentedViewController.isBeingDismissed) {
+        top = top.presentedViewController;
+    }
+    return top;
+}
+
 static UIViewController *LCTopMostPresenterViewController(void) {
+    UIViewController *modalRoot = LCEnsureTopLevelModalHostController();
+    if (modalRoot) return modalRoot;
     UIWindow *keyWin = nil;
     for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
         if (![s isKindOfClass:[UIWindowScene class]]) continue;
@@ -2036,7 +2563,7 @@ static UIViewController *LCTopMostPresenterViewController(void) {
 
 static void LCPresentBeadSettingsSheet(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *presenter = LCTopMostPresenterViewController();
+        UIViewController *presenter = LCEnsureTopLevelModalHostController();
         if (!presenter) return;
         if ([presenter isKindOfClass:[UINavigationController class]]) {
             UIViewController *topVC = ((UINavigationController *)presenter).topViewController;
@@ -2286,7 +2813,9 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     self.drawerView.onLongPressApp = ^(LCSwitcherAppInfo *app) {
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
         [feedback impactOccurred];
-        [weakSelf closeMultitaskProcessForApp:app];
+        if (gIsMultitaskHostMode) {
+            [weakSelf closeMultitaskProcessForApp:app];
+        }
     };
     self.drawerView.onToggleAutoRotate = ^(BOOL enabled) {
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -2297,6 +2826,16 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
         LCRefreshInterfaceOrientationsNow();
     };
     self.drawerView.onChangeScreenScale = ^(CGFloat scale) {
+        if (gIsMultitaskHostMode) {
+            id gnoix = LCGnoixBridge();
+            if (gnoix) {
+                SEL scaleSel = NSSelectorFromString(@"setFocusedScale:");
+                if ([gnoix respondsToSelector:scaleSel]) {
+                    ((void (*)(id, SEL, CGFloat))objc_msgSend)(gnoix, scaleSel, scale);
+                }
+                return;
+            }
+        }
         NSString *runningFolder = [LCSwitcher currentGuestFolderName];
         LCSaveScreenScaleForFolder(runningFolder, scale);
         LCApplyScreenScaleNow();
@@ -2379,6 +2918,9 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     }
     CGSize canvasSize = (self.view.bounds.size.width > 0 && self.view.bounds.size.height > 0) ? self.view.bounds.size : [UIScreen mainScreen].bounds.size;
     [self updateLayoutForCanvasSize:canvasSize];
+    if (self.isDrawerOpen) {
+        [self refreshAppList];
+    }
 }
 
 - (void)handleEdgeSwipePan:(UIPanGestureRecognizer *)gesture {
@@ -2398,17 +2940,37 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
 }
 
 - (void)loadSavedBeadPosition {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    double savedRatio = [ud doubleForKey:@"LCSwitcher_BeadCenterYRatio"];
-    if (savedRatio > 0.1 && savedRatio < 0.9) {
-        _beadCenterYRatio = (CGFloat)savedRatio;
+    // 优先读取全局共享配置（所有单开/多任务应用共用最新微珠位置）
+    NSDictionary *sharedCfg = LCLoadSharedConfig();
+    NSNumber *sharedRatio = sharedCfg[@"beadCenterYRatio"];
+    NSNumber *sharedPinnedRight = sharedCfg[@"beadPinnedRight"];
+    if ([sharedRatio isKindOfClass:[NSNumber class]]) {
+        double v = sharedRatio.doubleValue;
+        if (v >= 0.0 && v <= 1.0) {
+            _beadCenterYRatio = (CGFloat)v;
+        }
+    } else {
+        double savedRatio = [[NSUserDefaults standardUserDefaults] doubleForKey:@"LCSwitcher_BeadCenterYRatio"];
+        if (savedRatio > 0.1 && savedRatio < 0.9) {
+            _beadCenterYRatio = (CGFloat)savedRatio;
+        }
     }
-    if ([ud objectForKey:@"LCSwitcher_BeadPinnedRight"]) {
-        _isBeadPinnedRight = [ud boolForKey:@"LCSwitcher_BeadPinnedRight"];
+    if ([sharedPinnedRight isKindOfClass:[NSNumber class]]) {
+        _isBeadPinnedRight = sharedPinnedRight.boolValue;
+    } else if ([[NSUserDefaults standardUserDefaults] objectForKey:@"LCSwitcher_BeadPinnedRight"]) {
+        _isBeadPinnedRight = [[NSUserDefaults standardUserDefaults] boolForKey:@"LCSwitcher_BeadPinnedRight"];
     }
 }
 
 - (void)saveBeadPosition {
+    // 写入全局共享配置，确保所有应用切入时统一记住最新位置
+    NSString *path = LCSharedConfigPath();
+    if (path.length) {
+        NSMutableDictionary *merged = [LCLoadSharedConfig() mutableCopy] ?: [NSMutableDictionary dictionary];
+        merged[@"beadCenterYRatio"] = @((double)_beadCenterYRatio);
+        merged[@"beadPinnedRight"] = @(_isBeadPinnedRight);
+        [merged writeToFile:path atomically:YES];
+    }
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     [ud setDouble:(double)_beadCenterYRatio forKey:@"LCSwitcher_BeadCenterYRatio"];
     [ud setBool:_isBeadPinnedRight forKey:@"LCSwitcher_BeadPinnedRight"];
@@ -2421,12 +2983,13 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     UIEdgeInsets insets = self.view.safeAreaInsets;
     CGFloat safeTop = insets.top > 0 ? insets.top : 44.0;
     CGFloat safeBottom = insets.bottom > 0 ? insets.bottom : 34.0;
-    CGFloat beadW = 10.0;
+    CGFloat beadW = 7.0;
     CGFloat beadH = 60.0;
+    CGFloat edgeInset = 2.0;
     CGFloat usableHeight = MAX(size.height - safeTop - safeBottom - beadH, 100.0);
 
     CGFloat targetY = safeTop + usableHeight * _beadCenterYRatio;
-    CGFloat targetX = _isBeadPinnedRight ? (size.width - beadW) : 0.0;
+    CGFloat targetX = _isBeadPinnedRight ? (size.width - beadW - edgeInset) : edgeInset;
 
     self.beadView.isPinnedRight = _isBeadPinnedRight;
     self.beadView.frame = CGRectMake(targetX, targetY, beadW, beadH);
@@ -2435,16 +2998,17 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     CGFloat edgeX = _isBeadPinnedRight ? (size.width - edgeW) : 0.0;
     _edgeSwipeView.frame = CGRectMake(edgeX, safeTop + 20.0, edgeW, MAX(size.height - safeTop - safeBottom - 40.0, 120.0));
 
-    CGFloat maxDrawerH = MAX(size.height - safeTop - safeBottom - 32.0, 220.0);
-    CGFloat drawerH = MIN(360.0, maxDrawerH);
+    BOOL isListMode = (LCSharedGridColumns() == 1);
+    CGFloat maxDrawerH = MAX(size.height - safeTop - safeBottom - 36.0, 240.0);
+    CGFloat drawerH = MIN(isListMode ? 404.0 : 368.0, maxDrawerH);
     CGFloat drawerY = safeTop + (size.height - safeTop - safeBottom - drawerH) / 2.0;
-    CGFloat drawerActualW = MIN(296.0, size.width - 32.0);
+    CGFloat drawerActualW = MIN(isListMode ? 260.0 : 296.0, size.width - 28.0);
 
     if (self.isDrawerOpen) {
-        CGFloat drawerX = _isBeadPinnedRight ? (size.width - drawerActualW - 8.0) : 8.0;
+        CGFloat drawerX = _isBeadPinnedRight ? (size.width - drawerActualW - 10.0) : 10.0;
         self.drawerView.frame = CGRectMake(drawerX, drawerY, drawerActualW, drawerH);
     } else {
-        CGFloat drawerHiddenX = _isBeadPinnedRight ? (size.width + 20.0) : (-drawerActualW - 20.0);
+        CGFloat drawerHiddenX = _isBeadPinnedRight ? (size.width + 24.0) : (-drawerActualW - 24.0);
         self.drawerView.frame = CGRectMake(drawerHiddenX, drawerY, drawerActualW, drawerH);
     }
 }
@@ -2454,18 +3018,19 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     UIEdgeInsets insets = self.view.safeAreaInsets;
     CGFloat safeTop = insets.top > 0 ? insets.top : 44.0;
     CGFloat safeBottom = insets.bottom > 0 ? insets.bottom : 34.0;
-    CGFloat beadW = 10.0;
+    CGFloat beadW = 7.0;
     CGFloat beadH = 60.0;
+    CGFloat edgeInset = 2.0;
     CGFloat usableHeight = MAX(size.height - safeTop - safeBottom - beadH, 100.0);
 
     CGFloat clampedY = MIN(MAX(center.y, safeTop + beadH / 2.0), size.height - safeBottom - beadH / 2.0);
-    _beadCenterYRatio = (clampedY - safeTop) / usableHeight;
+    _beadCenterYRatio = MIN(MAX((clampedY - safeTop - beadH / 2.0) / usableHeight, 0.0), 1.0);
 
     _isBeadPinnedRight = (center.x >= size.width / 2.0);
     self.beadView.isPinnedRight = _isBeadPinnedRight;
     [self saveBeadPosition];
 
-    CGFloat targetX = _isBeadPinnedRight ? (size.width - beadW) : 0.0;
+    CGFloat targetX = _isBeadPinnedRight ? (size.width - beadW - edgeInset) : edgeInset;
     CGFloat targetY = clampedY - beadH / 2.0;
 
     __weak typeof(self) weakSelf = self;
@@ -2499,33 +3064,63 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     UIEdgeInsets insets = self.view.safeAreaInsets;
     CGFloat safeTop = insets.top > 0 ? insets.top : 44.0;
     CGFloat safeBottom = insets.bottom > 0 ? insets.bottom : 34.0;
-    CGFloat maxDrawerH = MAX(size.height - safeTop - safeBottom - 32.0, 220.0);
-    CGFloat drawerH = MIN(360.0, maxDrawerH);
+    BOOL isListMode = (LCSharedGridColumns() == 1);
+    CGFloat maxDrawerH = MAX(size.height - safeTop - safeBottom - 36.0, 240.0);
+    CGFloat drawerH = MIN(isListMode ? 404.0 : 368.0, maxDrawerH);
     CGFloat drawerY = safeTop + (size.height - safeTop - safeBottom - drawerH) / 2.0;
-    CGFloat drawerActualW = MIN(296.0, size.width - 32.0);
+    CGFloat drawerActualW = MIN(isListMode ? 260.0 : 296.0, size.width - 28.0);
 
-    CGFloat targetX = open
-        ? (_isBeadPinnedRight ? (size.width - drawerActualW - 8.0) : 8.0)
-        : (_isBeadPinnedRight ? (size.width + 20.0) : (-drawerActualW - 20.0));
+    CGFloat openX = _isBeadPinnedRight ? (size.width - drawerActualW - 10.0) : 10.0;
+    CGFloat slideDeltaX = _isBeadPinnedRight ? 34.0 : -34.0;
 
     if (open) {
-        self.drawerView.frame = CGRectMake(
-            _isBeadPinnedRight ? (size.width + 20.0) : (-drawerActualW - 20.0),
-            drawerY,
-            drawerActualW,
-            drawerH
+        self.drawerView.transform = CGAffineTransformIdentity;
+        self.drawerView.frame = CGRectMake(openX, drawerY, drawerActualW, drawerH);
+        [self.drawerView layoutIfNeeded];
+        self.drawerView.alpha = 0.0;
+        self.drawerView.transform = CGAffineTransformConcat(
+            CGAffineTransformMakeScale(0.84, 0.88),
+            CGAffineTransformMakeTranslation(slideDeltaX, 0)
         );
+        [self.drawerView playEntranceWaveFromRight:_isBeadPinnedRight];
     }
 
-    NSTimeInterval duration = animated ? 0.28 : 0.0;
+    NSTimeInterval duration = animated ? (open ? 0.38 : 0.22) : 0.0;
+    CGFloat damping = open ? 0.76 : 0.92;
+    CGFloat velocity = open ? 0.70 : 0.30;
     __weak typeof(self) weakSelf = self;
-    [UIView animateWithDuration:duration delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.6 options:0 animations:^{
+    [UIView animateWithDuration:duration
+                          delay:0
+         usingSpringWithDamping:damping
+          initialSpringVelocity:velocity
+                        options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
         weakSelf.dimmingMaskView.alpha = open ? 1.0 : 0.0;
-        weakSelf.drawerView.frame = CGRectMake(targetX, drawerY, drawerActualW, drawerH);
-        weakSelf.beadView.alpha = open ? 0.0 : 1.0;
+        if (open) {
+            weakSelf.drawerView.alpha = 1.0;
+            weakSelf.drawerView.transform = CGAffineTransformIdentity;
+            weakSelf.beadView.alpha = 0.0;
+            weakSelf.beadView.transform = CGAffineTransformMakeScale(0.45, 0.45);
+        } else {
+            weakSelf.drawerView.alpha = 0.0;
+            weakSelf.drawerView.transform = CGAffineTransformConcat(
+                CGAffineTransformMakeScale(0.88, 0.90),
+                CGAffineTransformMakeTranslation(slideDeltaX * 0.7, 0)
+            );
+            weakSelf.beadView.alpha = 1.0;
+            weakSelf.beadView.transform = CGAffineTransformIdentity;
+        }
     } completion:^(BOOL finished) {
-        if (!open) {
-            [weakSelf resetInactivityTimer];
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!open && strongSelf && !strongSelf.isDrawerOpen) {
+            strongSelf.drawerView.transform = CGAffineTransformIdentity;
+            strongSelf.drawerView.frame = CGRectMake(
+                strongSelf->_isBeadPinnedRight ? (size.width + 24.0) : (-drawerActualW - 24.0),
+                drawerY,
+                drawerActualW,
+                drawerH
+            );
+            [strongSelf resetInactivityTimer];
         }
     }];
 }
@@ -2536,31 +3131,49 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     NSString *foregroundUUID = nil;
     NSMutableSet<NSString *> *runningUUIDs = [NSMutableSet set];
     if (gIsMultitaskHostMode) {
-        UIViewController *topDVC = [self topmostVisibleDecoratedSceneVC];
-        if (topDVC) {
+        id gnoix = LCGnoixBridge();
+        if (gnoix) {
             @try {
-                foregroundUUID = [topDVC valueForKey:@"dataUUID"];
-            } @catch (__unused NSException *e) {}
-        }
-        Class mmCls = LCFindHostClass(@"MultitaskManager");
-        SEL isUsingSel = NSSelectorFromString(@"isUsingWithContainer:");
-        for (UIViewController *vc in [self allActiveDecoratedSceneVCs]) {
-            @try {
-                NSString *uuid = [vc valueForKey:@"dataUUID"];
-                if (!uuid.length) continue;
-                BOOL usingNow = YES;
-                if (mmCls && [mmCls respondsToSelector:isUsingSel]) {
-                    usingNow = ((BOOL (*)(id, SEL, NSString *))objc_msgSend)(mmCls, isUsingSel, uuid);
-                }
-                if (usingNow) {
-                    [runningUUIDs addObject:uuid];
+                foregroundUUID = [gnoix valueForKey:@"focusedSessionUUID"];
+                NSArray<NSString *> *uuids = [gnoix valueForKey:@"runningSessionUUIDs"];
+                if ([uuids isKindOfClass:[NSArray class]]) {
+                    [runningUUIDs addObjectsFromArray:uuids];
                 }
             } @catch (__unused NSException *e) {}
+        } else {
+            UIViewController *topDVC = [self topmostVisibleDecoratedSceneVC];
+            if (topDVC) {
+                @try {
+                    foregroundUUID = [topDVC valueForKey:@"dataUUID"];
+                } @catch (__unused NSException *e) {}
+            }
+            Class mmCls = LCFindHostClass(@"MultitaskManager");
+            SEL isUsingSel = NSSelectorFromString(@"isUsingWithContainer:");
+            for (UIViewController *vc in [self allActiveDecoratedSceneVCs]) {
+                @try {
+                    NSString *uuid = [vc valueForKey:@"dataUUID"];
+                    if (!uuid.length) continue;
+                    BOOL usingNow = YES;
+                    if (mmCls && [mmCls respondsToSelector:isUsingSel]) {
+                        usingNow = ((BOOL (*)(id, SEL, NSString *))objc_msgSend)(mmCls, isUsingSel, uuid);
+                    }
+                    if (usingNow) {
+                        [runningUUIDs addObject:uuid];
+                    }
+                } @catch (__unused NSException *e) {}
+            }
         }
     }
     [self.drawerView setAutoRotateRowHidden:gIsMultitaskHostMode];
     [self.drawerView setAutoRotateEnabled:LCLoadForceAutoRotateForFolder(runningFolder)];
-    [self.drawerView setScreenScale:LCLoadScreenScaleForFolder(runningFolder)];
+    CGFloat currentScale = LCLoadScreenScaleForFolder(runningFolder);
+    if (gIsMultitaskHostMode) {
+        id gnoix = LCGnoixBridge();
+        if (gnoix) {
+            @try { currentScale = (CGFloat)[[gnoix valueForKey:@"focusedScaleRatio"] doubleValue]; } @catch (__unused NSException *e) {}
+        }
+    }
+    [self.drawerView setScreenScale:currentScale];
     [self.drawerView setPiPActive:[[LCPictureInPictureManager sharedManager] isPiPActive]];
     [self.drawerView setTrueFullscreenActive:[self isActiveMultitaskTrueFullscreen]];
     [self.drawerView reloadWithApps:apps runningFolder:runningFolder foregroundUUID:foregroundUUID runningUUIDs:runningUUIDs];
@@ -2616,6 +3229,14 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
         [LCSwitcher presentTransitionAndReturnHomeWithCompletion:nil];
         return;
     }
+    id gnoix = LCGnoixBridge();
+    if (gnoix) {
+        SEL termAllSel = NSSelectorFromString(@"terminateAllSessions");
+        if ([gnoix respondsToSelector:termAllSel]) {
+            ((void (*)(id, SEL))objc_msgSend)(gnoix, termAllSel);
+            return;
+        }
+    }
     SEL closeSel = NSSelectorFromString(@"closeWindow");
     for (UIViewController *vc in [self allActiveDecoratedSceneVCs]) {
         if ([vc respondsToSelector:closeSel]) {
@@ -2632,6 +3253,14 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
         NSString *plistPath = [[docs stringByAppendingPathComponent:@"Applications"] stringByAppendingPathComponent:[app.folderName stringByAppendingPathComponent:@"LCAppInfo.plist"]];
         NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:plistPath];
         targetUUID = info[@"LCDataUUID"] ?: @"";
+    }
+    id gnoix = LCGnoixBridge();
+    if (gnoix && targetUUID.length) {
+        SEL termSel = NSSelectorFromString(@"terminateSessionWithDataUUID:");
+        if ([gnoix respondsToSelector:termSel]) {
+            ((void (*)(id, SEL, NSString *))objc_msgSend)(gnoix, termSel, targetUUID);
+            return;
+        }
     }
     SEL closeSel = NSSelectorFromString(@"closeWindow");
     for (UIViewController *vc in [self allActiveDecoratedSceneVCs]) {
@@ -2653,6 +3282,10 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
 
 - (BOOL)isActiveMultitaskTrueFullscreen {
     if (!gIsMultitaskHostMode) return NO;
+    id gnoix = LCGnoixBridge();
+    if (gnoix) {
+        @try { return [[gnoix valueForKey:@"isFocusedMaximized"] boolValue]; } @catch (__unused NSException *e) {}
+    }
     Class dockMgrCls = LCFindHostClass(@"MultitaskDockManager");
     if (dockMgrCls && [dockMgrCls respondsToSelector:@selector(shared)]) {
         id dockMgr = [dockMgrCls valueForKey:@"shared"];
@@ -2665,6 +3298,16 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
 
 - (BOOL)toggleActiveMultitaskTrueFullscreen {
     if (!gIsMultitaskHostMode) return NO;
+    id gnoix = LCGnoixBridge();
+    if (gnoix) {
+        SEL toggleSel = NSSelectorFromString(@"toggleFocusedFullscreen");
+        if ([gnoix respondsToSelector:toggleSel]) {
+            ((void (*)(id, SEL))objc_msgSend)(gnoix, toggleSel);
+            BOOL nowMax = NO;
+            @try { nowMax = [[gnoix valueForKey:@"isFocusedMaximized"] boolValue]; } @catch (__unused NSException *e) {}
+            return nowMax;
+        }
+    }
     Class dockMgrCls = LCFindHostClass(@"MultitaskDockManager");
     if (!dockMgrCls || ![dockMgrCls respondsToSelector:@selector(shared)]) return NO;
     id dockMgr = [dockMgrCls valueForKey:@"shared"];
@@ -2779,6 +3422,10 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     return s_instance;
 }
 
++ (void)presentSettingsFromTopViewController {
+    LCPresentBeadSettingsSheet();
+}
+
 // MARK: - 生命周期安装与门禁检查
 
 + (void)setupIfNeeded {
@@ -2849,14 +3496,22 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
         return;
     }
 
-    // 多任务宿主模式：直接作为 subview 挂载在宿主 keyWindow 顶层，绝不新建 UIWindow，避免干扰 LC 的 rootVC / launchMultitaskGuestApp
+    // 多任务宿主模式：直接作为 subview 挂载在最高层非系统窗口顶层（Gnoix 优先挂载在 GnoixPassthroughOverlayWindow 之上，LC 挂载在 keyWindow 之上）
     if (gIsMultitaskHostMode) {
         UIWindow *hostWin = nil;
+        UIWindow *gnoixOverlayWin = nil;
         for (UIWindow *w in scene.windows) {
             if (w.hidden || !w.rootViewController) continue;
-            if (w.isKeyWindow) { hostWin = w; break; }
+            NSString *wCls = NSStringFromClass([w class]);
+            if ([wCls containsString:@"Keyboard"] || [wCls containsString:@"TextEffects"] || [wCls containsString:@"StatusBar"]) continue;
+            if ([wCls containsString:@"GnoixPassthroughOverlayWindow"]) {
+                gnoixOverlayWin = w;
+                break;
+            }
+            if (w.isKeyWindow) { hostWin = w; }
             if (!hostWin) hostWin = w;
         }
+        if (gnoixOverlayWin) hostWin = gnoixOverlayWin;
         if (!hostWin) return;
 
         LCSwitcherOverlayController *controller = [[LCSwitcherOverlayController alloc] init];
@@ -2895,6 +3550,23 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
 
 - (void)ensureWindowAttached {
     if (self.hostOverlayView) {
+        UIWindow *targetWin = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if (![s isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                if (w.hidden || !w.rootViewController) continue;
+                if ([NSStringFromClass([w class]) containsString:@"GnoixPassthroughOverlayWindow"]) {
+                    targetWin = w;
+                    break;
+                }
+            }
+            if (targetWin) break;
+        }
+        if (targetWin && self.hostOverlayView.superview != targetWin) {
+            [self.hostOverlayView removeFromSuperview];
+            self.hostOverlayView.frame = targetWin.bounds;
+            [targetWin addSubview:self.hostOverlayView];
+        }
         self.hostOverlayView.hidden = NO;
         if (self.hostOverlayView.superview) {
             self.hostOverlayView.frame = self.hostOverlayView.superview.bounds;
@@ -3211,6 +3883,15 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
     [feedback impactOccurred];
 
     if (gIsMultitaskHostMode) {
+        id gnoix = LCGnoixBridge();
+        if (gnoix) {
+            SEL launchSel = NSSelectorFromString(@"launchOrToggleAppWithFolderName:dataUUID:");
+            if ([gnoix respondsToSelector:launchSel]) {
+                ((void (*)(id, SEL, NSString *, NSString *))objc_msgSend)(gnoix, launchSel, app.folderName ?: @"", app.dataUUID ?: @"");
+                if (completion) completion(YES);
+                return;
+            }
+        }
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSString *docs = [self realHostDocumentsDirectory];
             NSFileManager *fm = [NSFileManager defaultManager];
@@ -3377,6 +4058,15 @@ static void LCAttachBeadSettingsButtonToMultitaskNavBarIfNeeded(void) {
 
     if (gIsMultitaskHostMode) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            id gnoix = LCGnoixBridge();
+            if (gnoix) {
+                SEL minAllSel = NSSelectorFromString(@"minimizeAllSessions");
+                if ([gnoix respondsToSelector:minAllSel]) {
+                    ((void (*)(id, SEL))objc_msgSend)(gnoix, minAllSel);
+                    if (completion) completion(YES);
+                    return;
+                }
+            }
             Class dockMgrCls = LCFindHostClass(@"MultitaskDockManager");
             if (dockMgrCls && [dockMgrCls respondsToSelector:@selector(shared)]) {
                 id dockMgr = [dockMgrCls valueForKey:@"shared"];
@@ -4097,6 +4787,14 @@ static void LCHideLCMultitaskDockWindow(id dockMgr) {
 }
 
 static BOOL LCIsHostCurrentlyMultitasking(id *outDockMgr) {
+    id gnoix = LCGnoixBridge();
+    if (gnoix) {
+        if (outDockMgr) *outDockMgr = nil;
+        @try {
+            return [[gnoix valueForKey:@"isActive"] boolValue];
+        } @catch (__unused NSException *e) {}
+    }
+
     Class dockMgrCls = LCFindHostClass(@"MultitaskDockManager");
     Class multitaskMgrCls = LCFindHostClass(@"MultitaskManager");
 
@@ -4175,6 +4873,23 @@ static void LCInstallMultitaskSidebarReplacementHooksIfNeeded(void) {
             orig_Window_didAddSubview = (void (*)(id, SEL, UIView *))method_setImplementation(m, (IMP)hook_Window_didAddSubview);
         }
     }
+
+    // 监听 GnoixMultitaskBridge 状态广播（0ms 事件驱动刷新，无需等待定时器）
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"GnoixMultitaskSessionsDidChange"
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        if (LCIsMultitaskExtensionProcess() || [LCSwitcher isContainerGuestRunning]) return;
+        BOOL hasMultitask = LCIsHostCurrentlyMultitasking(NULL);
+        LCActivateMultitaskHostSwitcherIfNeeded(hasMultitask);
+        if (hasMultitask) {
+            LCSwitcher *mgr = [LCSwitcher sharedManager];
+            if (mgr.hostOverlayView && mgr.hostOverlayView.superview) {
+                [mgr.hostOverlayView.superview bringSubviewToFront:mgr.hostOverlayView];
+            }
+            [mgr.overlayController refreshAppList];
+        }
+    }];
 
     // 延时 0.8 秒待宿主就绪后启动 0.15s 轻量级多任务状态同步
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{

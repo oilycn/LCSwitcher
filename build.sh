@@ -76,7 +76,7 @@ cat <<EOF > "${SCRIPT_DIR}/${OUTPUT_NAME}.plist"
 EOF
 
 # 6. 打包为标准 .deb 越狱/容器插件包 (优先使用 dpkg-deb，无工具链时自动采用纯原生物理封装)
-DEB_FILE="${SCRIPT_DIR}/${OUTPUT_NAME}_1.2.0_iphoneos-arm.deb"
+DEB_FILE="${SCRIPT_DIR}/${OUTPUT_NAME}_1.3.0_iphoneos-arm.deb"
 echo "📦 正在打包为 .deb 插件包..."
 
 if command -v dpkg-deb >/dev/null 2>&1; then
@@ -87,7 +87,7 @@ if command -v dpkg-deb >/dev/null 2>&1; then
     cat <<EOF > "${DEB_DIR}/DEBIAN/control"
 Package: cn.oily.lcswitcher
 Name: LCSwitcher
-Version: 1.2.0
+Version: 1.3.0
 Architecture: iphoneos-arm
 Description: LiveContainer / Gnoix 单任务快速切换侧边栏插件
 Maintainer: Gnoix Team
@@ -114,7 +114,7 @@ plist_path = '${SCRIPT_DIR}/${OUTPUT_NAME}.plist'
 
 control_content = '''Package: cn.oily.lcswitcher
 Name: LCSwitcher
-Version: 1.2.0
+Version: 1.3.0
 Architecture: iphoneos-arm
 Description: LiveContainer / Gnoix 单任务快速切换侧边栏插件
 Maintainer: Gnoix Team
