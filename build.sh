@@ -40,7 +40,13 @@ xcrun --sdk iphoneos clang \
     -framework AVKit \
     -framework AVFoundation \
     -I "${SCRIPT_DIR}" \
-    -O3 \
+    -Oz \
+    -fno-objc-msgsend-selector-stubs \
+    -ffunction-sections \
+    -fdata-sections \
+    -Wl,-dead_strip \
+    -Wl,-S \
+    -Wl,-x \
     -o "${DYLIB_OUT}" \
     "${SCRIPT_DIR}/${OUTPUT_NAME}.m"
 

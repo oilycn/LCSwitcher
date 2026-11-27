@@ -144,16 +144,6 @@ static void LCSaveSharedConfigDict(NSDictionary *updates) {
     [[NSNotificationCenter defaultCenter] postNotificationName:LCSwitcherConfigDidChangeNotification object:nil];
 }
 
-static void LCSaveSharedConfig(NSString *sidebarStyle, NSString *beadStyle, double collapsedOpacity, BOOL defaultFollowRotate) {
-    double clamped = fmin(fmax(collapsedOpacity, 0.4), 1.0);
-    LCSaveSharedConfigDict(@{
-        @"sidebarStyle": sidebarStyle ?: @"floatingBead",
-        @"beadStyle": beadStyle ?: @"minimalLine",
-        @"collapsedOpacity": @(clamped),
-        @"defaultFollowSystemOrientation": @(defaultFollowRotate)
-    });
-}
-
 static NSUInteger LCSharedGridColumns(void) {
     NSNumber *n = LCLoadSharedConfig()[@"gridColumns"];
     if ([n isKindOfClass:[NSNumber class]]) {
@@ -1602,14 +1592,6 @@ static void LCApplyScreenScaleNow(void) {
     CAGradientLayer *_glassSheenLayer;
     CAGradientLayer *_borderGradientLayer;
     CAShapeLayer *_borderMaskLayer;
-    UIView *_headerView;
-    UIView *_statusPill;
-    UIView *_statusDot;
-    UILabel *_titleLabel;
-    UILabel *_countBadge;
-    UIButton *_gridToggleButton;
-    UIButton *_closeButton;
-    UIView *_gridTrayView;
     UIView *_controlsPanel;
     UIStackView *_controlsStack;
     UIView *_scalePopoverBar;
@@ -2102,38 +2084,7 @@ static void LCApplyScreenScaleNow(void) {
     _pipActionTitleLabel.text = active ? @"退出画中画" : @"画中画";
 }
 
-static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
-    if (!image || !image.CGImage) return image;
-    CGImageRef cgImg = image.CGImage;
-    size_t w = CGImageGetWidth(cgImg);
-    size_t h = CGImageGetHeight(cgImg);
-    if (w == 0 || h == 0) return image;
-
-    CGColorSpaceRef graySpace = CGColorSpaceCreateDeviceGray();
-    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, graySpace, (CGBitmapInfo)kCGImageAlphaNone);
-    CGColorSpaceRelease(graySpace);
-    if (!ctx) return image;
-
-    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cgImg);
-    CGImageRef grayCG = CGBitmapContextCreateImage(ctx);
-    CGContextRelease(ctx);
-    if (!grayCG) return image;
-
-    UIImage *result = [UIImage imageWithCGImage:grayCG scale:image.scale orientation:image.imageOrientation];
-    CGImageRelease(grayCG);
-    return result;
-}
-
 - (void)reloadWithApps:(NSArray<LCSwitcherAppInfo *> *)apps runningFolder:(NSString *)runningFolder foregroundUUID:(nullable NSString *)foregroundUUID runningUUIDs:(nullable NSSet<NSString *> *)runningUUIDs {
-    if (gIsMultitaskHostMode) {
-        NSUInteger activeCount = runningUUIDs.count;
-        _titleLabel.text = activeCount > 0 ? [NSString stringWithFormat:@"多任务 · 运行中 %lu", (unsigned long)activeCount] : @"多任务切换";
-    } else {
-        NSString *display = runningFolder.length ? [runningFolder stringByDeletingPathExtension] : @"单开切换";
-        _titleLabel.text = display;
-    }
-    _countBadge.text = [NSString stringWithFormat:@" %lu ", (unsigned long)apps.count];
-
     for (UIView *sub in [_stackView.arrangedSubviews copy]) {
         [_stackView removeArrangedSubview:sub];
         [sub removeFromSuperview];
@@ -2524,107 +2475,6 @@ static UIImage * _Nullable LCGrayscaleImage(UIImage * _Nullable image) {
     if (app && self.onLongPressApp) {
         self.onLongPressApp(app);
     }
-}
-
-- (UIView *)createAppRowWithApp:(LCSwitcherAppInfo *)app isRunning:(BOOL)isRunning {
-    UIButton *card = [UIButton buttonWithType:UIButtonTypeCustom];
-    card.translatesAutoresizingMaskIntoConstraints = NO;
-    card.backgroundColor = isRunning ? [[UIColor systemGreenColor] colorWithAlphaComponent:0.22] : [UIColor colorWithWhite:1.0 alpha:0.09];
-    card.layer.cornerRadius = 14.0;
-    card.layer.cornerCurve = kCACornerCurveContinuous;
-    card.layer.borderWidth = isRunning ? 1.0 : 0.5;
-    card.layer.borderColor = isRunning ? [[UIColor systemGreenColor] colorWithAlphaComponent:0.6].CGColor : [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
-
-    UIImageView *iconView = [[UIImageView alloc] init];
-    iconView.image = app.icon ?: [UIImage systemImageNamed:@"app.fill"];
-    iconView.contentMode = UIViewContentModeScaleAspectFill;
-    iconView.layer.cornerRadius = 10.0;
-    iconView.layer.cornerCurve = kCACornerCurveContinuous;
-    iconView.clipsToBounds = YES;
-    iconView.layer.borderWidth = 0.5;
-    iconView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.25].CGColor;
-    iconView.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:iconView];
-
-    UIStackView *textStack = [[UIStackView alloc] init];
-    textStack.axis = UILayoutConstraintAxisVertical;
-    textStack.spacing = 2.0;
-    textStack.translatesAutoresizingMaskIntoConstraints = NO;
-    textStack.userInteractionEnabled = NO;
-
-    UILabel *nameLabel = [[UILabel alloc] init];
-    nameLabel.text = app.name;
-    nameLabel.font = [UIFont systemFontOfSize:14.0 weight:(isRunning ? UIFontWeightBold : UIFontWeightMedium)];
-    nameLabel.textColor = [UIColor whiteColor];
-    nameLabel.numberOfLines = 1;
-
-    UILabel *subLabel = [[UILabel alloc] init];
-    NSString *ver = app.version.length ? [NSString stringWithFormat:@"v%@", app.version] : @"";
-    subLabel.text = ver.length ? [NSString stringWithFormat:@"%@ • %@", ver, app.folderName] : app.folderName;
-    subLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
-    subLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.65];
-    subLabel.numberOfLines = 1;
-
-    [textStack addArrangedSubview:nameLabel];
-    [textStack addArrangedSubview:subLabel];
-    [card addSubview:textStack];
-
-    UIView *trailingView;
-    if (isRunning) {
-        UILabel *tag = [[UILabel alloc] init];
-        tag.text = @"● 运行中";
-        tag.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
-        tag.textColor = [UIColor systemGreenColor];
-        tag.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.25];
-        tag.layer.cornerRadius = 9.0;
-        tag.layer.cornerCurve = kCACornerCurveContinuous;
-        tag.clipsToBounds = YES;
-        tag.textAlignment = NSTextAlignmentCenter;
-        tag.translatesAutoresizingMaskIntoConstraints = NO;
-        trailingView = tag;
-        [NSLayoutConstraint activateConstraints:@[
-            [tag.widthAnchor constraintEqualToConstant:62.0],
-            [tag.heightAnchor constraintEqualToConstant:20.0]
-        ]];
-    } else {
-        UIImageView *switchIcon = [[UIImageView alloc] init];
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14.0 weight:UIImageSymbolWeightMedium];
-        switchIcon.image = [UIImage systemImageNamed:@"arrow.right.circle" withConfiguration:cfg];
-        switchIcon.tintColor = [UIColor colorWithWhite:1.0 alpha:0.4];
-        switchIcon.contentMode = UIViewContentModeScaleAspectFit;
-        switchIcon.translatesAutoresizingMaskIntoConstraints = NO;
-        trailingView = switchIcon;
-        [NSLayoutConstraint activateConstraints:@[
-            [switchIcon.widthAnchor constraintEqualToConstant:18.0],
-            [switchIcon.heightAnchor constraintEqualToConstant:18.0]
-        ]];
-    }
-    [card addSubview:trailingView];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [card.heightAnchor constraintEqualToConstant:54.0],
-
-        [iconView.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:10.0],
-        [iconView.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
-        [iconView.widthAnchor constraintEqualToConstant:38.0],
-        [iconView.heightAnchor constraintEqualToConstant:38.0],
-
-        [textStack.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:10.0],
-        [textStack.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
-        [textStack.trailingAnchor constraintLessThanOrEqualToAnchor:trailingView.leadingAnchor constant:-8.0],
-
-        [trailingView.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12.0],
-        [trailingView.centerYAnchor constraintEqualToAnchor:card.centerYAnchor]
-    ]];
-
-    __weak typeof(self) weakSelf = self;
-    UIAction *action = [UIAction actionWithHandler:^(__kindof UIAction * _Nonnull act) {
-        if (weakSelf.onUserInteraction) weakSelf.onUserInteraction();
-        if (weakSelf.onSelectApp) weakSelf.onSelectApp(app);
-    }];
-    [card addAction:action forControlEvents:UIControlEventTouchUpInside];
-
-    return card;
 }
 
 @end
